@@ -56,6 +56,52 @@ export function getPool(connectionId: string, config: PostgresConfig): pg.Pool {
 }
 
 /**
+ * Пул есть только после Connect; иначе null.
+ */
+export function getConnectedPool(connectionId: string): pg.Pool | null {
+  return pools.get(connectionId) ?? null;
+}
+
+export function isConnected(connectionId: string): boolean {
+  return pools.has(connectionId);
+}
+
+/**
+ * Открывает пул и проверяет SELECT 1. Уже открытый — переиспользует и пингует.
+ */
+export async function connectPool(
+  connectionId: string,
+  config: PostgresConfig,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const pool = getPool(connectionId, config);
+    await pool.query("SELECT 1");
+    return { ok: true };
+  } catch (error) {
+    await dropPool(connectionId);
+    return { ok: false, error: formatError(error) };
+  }
+}
+
+/**
+ * Закрывает пул (Disconnect). Конфиг в SQLite не трогает.
+ */
+export async function disconnectPool(connectionId: string): Promise<void> {
+  await dropPool(connectionId);
+}
+
+/**
+ * Закрывает пул и открывает заново (Reconnect).
+ */
+export async function reconnectPool(
+  connectionId: string,
+  config: PostgresConfig,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  await dropPool(connectionId);
+  return connectPool(connectionId, config);
+}
+
+/**
  * Закрывает и удаляет пул для connection id (после update/delete).
  */
 export async function dropPool(connectionId: string): Promise<void> {
@@ -130,30 +176,272 @@ export async function listTables(
   }));
 }
 
+export type ColumnDetail = {
+  name: string;
+  dataType: string;
+  isNullable: boolean;
+  defaultValue: string | null;
+  isPrimaryKey: boolean;
+  isUnique: boolean;
+  foreignKey: {
+    constraintName: string;
+    schema: string;
+    table: string;
+    column: string;
+  } | null;
+};
+
+export type ConstraintDetail = {
+  name: string;
+  type: "PRIMARY KEY" | "FOREIGN KEY" | "UNIQUE" | "CHECK" | "EXCLUDE";
+  columns: string[];
+  definition: string;
+};
+
+export type TableDescribe = {
+  columns: ColumnDetail[];
+  constraints: ConstraintDetail[];
+};
+
+const CONSTRAINT_TYPE_MAP: Record<string, ConstraintDetail["type"]> = {
+  p: "PRIMARY KEY",
+  f: "FOREIGN KEY",
+  u: "UNIQUE",
+  c: "CHECK",
+  x: "EXCLUDE",
+};
+
+/** pg иногда отдаёт array_agg как строку `{a,b}` вместо JS-массива. */
+function parsePgTextArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item));
+  }
+  if (typeof value !== "string") {
+    return [];
+  }
+  const trimmed = value.trim();
+  if (trimmed === "" || trimmed === "{}") {
+    return [];
+  }
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    return [trimmed];
+  }
+  const inner = trimmed.slice(1, -1);
+  if (!inner) {
+    return [];
+  }
+  const items: string[] = [];
+  let current = "";
+  let inQuote = false;
+  for (let index = 0; index < inner.length; index += 1) {
+    const ch = inner[index]!;
+    if (ch === '"') {
+      inQuote = !inQuote;
+      continue;
+    }
+    if (ch === "," && !inQuote) {
+      items.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current) {
+    items.push(current.trim());
+  }
+  return items;
+}
+
+function asBoolean(value: unknown): boolean {
+  return value === true || value === "t" || value === "true" || value === 1;
+}
+
+function asNullableString(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return String(value);
+}
+
+function asString(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return String(value);
+}
+
 /**
- * Колонки таблицы.
+ * Колонки таблицы (краткий список).
  */
 export async function listColumns(
   pool: pg.Pool,
   schema: string,
   table: string,
 ): Promise<{ name: string; dataType: string; isNullable: boolean }[]> {
-  const result = await pool.query<{
-    column_name: string;
+  const { columns } = await describeTable(pool, schema, table);
+  return columns.map((column) => ({
+    name: column.name,
+    dataType: column.dataType,
+    isNullable: column.isNullable,
+  }));
+}
+
+/**
+ * Колонки + constraints одной таблицы (для дерева и Describe).
+ */
+export async function describeTable(
+  pool: pg.Pool,
+  schema: string,
+  table: string,
+): Promise<TableDescribe> {
+  const columnsResult = await pool.query<{
+    name: string;
     data_type: string;
-    is_nullable: string;
+    is_nullable: boolean;
+    column_default: string | null;
+    is_primary_key: boolean;
+    is_unique: boolean;
   }>(
-    `SELECT column_name, data_type, is_nullable
-     FROM information_schema.columns
-     WHERE table_schema = $1 AND table_name = $2
-     ORDER BY ordinal_position`,
+    `SELECT
+       a.attname AS name,
+       pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+       NOT a.attnotnull AS is_nullable,
+       pg_catalog.pg_get_expr(ad.adbin, ad.adrelid) AS column_default,
+       EXISTS (
+         SELECT 1
+         FROM pg_catalog.pg_index i
+         WHERE i.indrelid = c.oid
+           AND i.indisprimary
+           AND a.attnum = ANY (i.indkey)
+       ) AS is_primary_key,
+       EXISTS (
+         SELECT 1
+         FROM pg_catalog.pg_index i
+         WHERE i.indrelid = c.oid
+           AND i.indisunique
+           AND NOT i.indisprimary
+           AND i.indnkeyatts = 1
+           AND a.attnum = i.indkey[0]
+       ) AS is_unique
+     FROM pg_catalog.pg_attribute a
+     JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     LEFT JOIN pg_catalog.pg_attrdef ad
+       ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+     WHERE n.nspname = $1
+       AND c.relname = $2
+       AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+       AND a.attnum > 0
+       AND NOT a.attisdropped
+     ORDER BY a.attnum`,
     [schema, table],
   );
-  return result.rows.map((row) => ({
-    name: row.column_name,
-    dataType: row.data_type,
-    isNullable: row.is_nullable === "YES",
+
+  const fkResult = await pool.query<{
+    column_name: string;
+    constraint_name: string;
+    foreign_schema: string;
+    foreign_table: string;
+    foreign_column: string;
+  }>(
+    `SELECT
+       src.attname AS column_name,
+       con.conname AS constraint_name,
+       fn.nspname AS foreign_schema,
+       ft.relname AS foreign_table,
+       tgt.attname AS foreign_column
+     FROM pg_catalog.pg_constraint con
+     JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS src_cols(attnum, ord)
+       ON true
+     JOIN pg_catalog.pg_attribute src
+       ON src.attrelid = con.conrelid AND src.attnum = src_cols.attnum
+     JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS tgt_cols(attnum, ord)
+       ON tgt_cols.ord = src_cols.ord
+     JOIN pg_catalog.pg_class ft ON ft.oid = con.confrelid
+     JOIN pg_catalog.pg_namespace fn ON fn.oid = ft.relnamespace
+     JOIN pg_catalog.pg_attribute tgt
+       ON tgt.attrelid = con.confrelid AND tgt.attnum = tgt_cols.attnum
+     WHERE con.contype = 'f'
+       AND n.nspname = $1
+       AND c.relname = $2
+     ORDER BY con.conname, src_cols.ord`,
+    [schema, table],
+  );
+
+  const fkByColumn = new Map<string, ColumnDetail["foreignKey"]>();
+  for (const row of fkResult.rows) {
+    if (!fkByColumn.has(row.column_name)) {
+      fkByColumn.set(row.column_name, {
+        constraintName: row.constraint_name,
+        schema: row.foreign_schema,
+        table: row.foreign_table,
+        column: row.foreign_column,
+      });
+    }
+  }
+
+  const constraintsResult = await pool.query<{
+    name: string;
+    contype: string;
+    definition: string;
+    columns: string[] | null;
+  }>(
+    `SELECT
+       con.conname AS name,
+       con.contype,
+       pg_catalog.pg_get_constraintdef(con.oid, true) AS definition,
+       (
+         SELECT array_agg(a.attname ORDER BY cols.ord)
+         FROM unnest(con.conkey) WITH ORDINALITY AS cols(attnum, ord)
+         JOIN pg_catalog.pg_attribute a
+           ON a.attrelid = con.conrelid AND a.attnum = cols.attnum
+       ) AS columns
+     FROM pg_catalog.pg_constraint con
+     JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = $1
+       AND c.relname = $2
+       AND con.contype IN ('p', 'f', 'u', 'c', 'x')
+     ORDER BY
+       CASE con.contype
+         WHEN 'p' THEN 0
+         WHEN 'u' THEN 1
+         WHEN 'f' THEN 2
+         WHEN 'c' THEN 3
+         ELSE 4
+       END,
+       con.conname`,
+    [schema, table],
+  );
+
+  const columns: ColumnDetail[] = columnsResult.rows.map((row) => ({
+    name: asString(row.name),
+    dataType: asString(row.data_type),
+    isNullable: asBoolean(row.is_nullable),
+    defaultValue: asNullableString(row.column_default),
+    isPrimaryKey: asBoolean(row.is_primary_key),
+    isUnique: asBoolean(row.is_unique),
+    foreignKey: fkByColumn.get(row.name) ?? null,
   }));
+
+  const constraints: ConstraintDetail[] = constraintsResult.rows
+    .map((row) => {
+      const type = CONSTRAINT_TYPE_MAP[row.contype];
+      if (!type) {
+        return null;
+      }
+      return {
+        name: asString(row.name),
+        type,
+        columns: parsePgTextArray(row.columns),
+        definition: asString(row.definition),
+      };
+    })
+    .filter((row): row is ConstraintDetail => row !== null);
+
+  return { columns, constraints };
 }
 
 /**
