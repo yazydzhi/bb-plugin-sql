@@ -6,7 +6,11 @@ locally (not in this repo). This file is the durable, shareable outlook.
 **Product promise:** read-only Postgres from bb — human panel + agent tools.
 Writes/DDL stay out of scope until explicitly revisited.
 
-## Shipped (pre-0.1)
+**Marketplace gate:** bb-community submission happens **only after** the classic
+SQL query workflow below works end-to-end (release **0.2**), not after the
+0.1 git tag alone.
+
+## Shipped (0.1)
 
 - Thread / New-thread **Actions → SQL** panel
 - Connection CRUD (plugin SQLite), test-before-save, online/offline indicator
@@ -14,19 +18,13 @@ Writes/DDL stay out of scope until explicitly revisited.
 - Read-only execution (`BEGIN READ ONLY`, statement timeout, row cap)
 - Result tabs + CSV/JSON copy & download
 - Agent tools: `sql_list_connections`, `sql_query`
+- Public GitHub + semver tag `v0.1.0`
+  (`git:https://github.com/yazydzhi/bb-plugin-sql.git@^0.1.0`)
 
-## 0.1 — Publish the probe
+## 0.2 — Classic SQL query workflow
 
-Make the current MVP installable by others.
-
-- [x] Public GitHub repo + semver tag `v0.1.0`
-- [ ] `bb plugin install git:…@^0.1.0` verified on a clean machine
-- [ ] bb-community marketplace submission (after git install works)
-- [ ] README empty-state / install path clear enough for first Aha
-
-## 0.2 — Explorer + files
-
-Reduce orientation tax; match the SQLTools split without leaving bb.
+Match the day-to-day SQLTools-style flow without leaving bb. This slice is
+what we mean by “classic SQL queries” for product planning.
 
 - [ ] **Layout split:** left **nav panel** = connections + schema tree;
   right **Actions panel** = editor + result tabs (shared *active connection*)
@@ -34,6 +32,12 @@ Reduce orientation tax; match the SQLTools split without leaving bb.
 - [ ] Query history (persist + re-run)
 - [ ] **`.sql` file opener:** run selection / whole file (still read-only);
   optional `-- @conn Name` header
+- [ ] Free-form read-only SQL in the editor already ships in 0.1; keep it
+      solid through the split (Run / ⌘Enter, result tabs, export)
+
+### After 0.2 — Marketplace
+
+- [ ] bb-community marketplace PR (`submit-a-plugin`) — **blocked on 0.2 DoD**
 
 ## 0.3 — Credential trust
 
@@ -59,4 +63,5 @@ Reduce orientation tax; match the SQLTools split without leaving bb.
 
 ## Feedback
 
-Issues and PRs on the GitHub repo are welcome once `0.1` is tagged.
+Issues and PRs on the GitHub repo are welcome. Marketplace listing comes after
+the classic query workflow (0.2) is done.
