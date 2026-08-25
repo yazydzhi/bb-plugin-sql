@@ -37,8 +37,8 @@ what we mean by “classic SQL queries” for product planning.
 
 ### After 0.2 — Marketplace
 
-- [ ] bb-community marketplace PR (`submit-a-plugin`) — **blocked on 0.2 DoD**
-  (tag a 0.2 release first when ready)
+- [x] Public release tag `v0.2.0`
+- [x] bb-community marketplace PR opened (`submit-a-plugin`) — awaiting review
 
 ## 0.3 — Credential trust
 
