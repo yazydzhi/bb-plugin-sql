@@ -1,0 +1,13 @@
+dist/
+node_modules/
+
+# Рабочие планы / AJTBD-черновики — не в публичный git
+TODO.md
+user_story_map.md
+_temp/
+_reports/
+_analytics/
+.DS_Store
+*.session.sql
+.env
+.env.*
