@@ -19,7 +19,7 @@ Writes/DDL stay out of scope until explicitly revisited.
 
 Make the current MVP installable by others.
 
-- [ ] Public GitHub repo + semver tag `v0.1.0`
+- [x] Public GitHub repo + semver tag `v0.1.0`
 - [ ] `bb plugin install git:…@^0.1.0` verified on a clean machine
 - [ ] bb-community marketplace submission (after git install works)
 - [ ] README empty-state / install path clear enough for first Aha
