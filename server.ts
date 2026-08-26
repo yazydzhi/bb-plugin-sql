@@ -938,9 +938,11 @@ export default async function plugin(bb: BbPluginApi) {
     description: "List configured Postgres connection names for sql_query.",
     instructions:
       "Call sql_list_connections before sql_query if you do not know which connection to use.",
-    experimental_statusLabels: {
-      pending: "Listing SQL connections",
-      completed: "Listed SQL connections",
+    presentation: {
+      label: {
+        pending: "Listing SQL connections",
+        completed: "Listed SQL connections",
+      },
     },
     parameters: z.object({}).strict(),
     async execute() {
@@ -964,9 +966,11 @@ export default async function plugin(bb: BbPluginApi) {
     instructions:
       "Use sql_query for read-only lookups against configured Postgres connections; " +
       "it is SELECT-only, writes are rejected by the database.",
-    experimental_statusLabels: {
-      pending: "Running SQL query",
-      completed: "Ran SQL query",
+    presentation: {
+      label: {
+        pending: "Running SQL query",
+        completed: "Ran SQL query",
+      },
     },
     parameters: z
       .object({
