@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-sql",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "SQLTools-style Postgres panel for bb: browse schemas/tables and run SQL. Read-only until 0.5 (INSERT/UPDATE/DELETE planned then) — see ROADMAP.md. Agents: sql_query + sql_list_connections.",
   "license": "MIT",
   "type": "module",

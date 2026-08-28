@@ -32,8 +32,9 @@ export default definePluginApp((app) => {
     icon: "Database",
     path: "sql",
     component: SqlExplorerPage,
-    experimental_fixedTabs: [
+    fixedTabs: [
       {
+        panelId: "sql",
         id: "query",
         title: "Query",
         icon: "Terminal",
