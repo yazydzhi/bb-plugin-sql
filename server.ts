@@ -962,10 +962,11 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "sql_query",
     description:
-      "Run a read-only SQL query against a configured Postgres connection.",
+      "Run a read-only SQL query against a configured Postgres connection (one statement per call).",
     instructions:
-      "Use sql_query for read-only lookups against configured Postgres connections; " +
-      "it is SELECT-only, writes are rejected by the database.",
+      "Use sql_query for read-only lookups against configured Postgres connections. " +
+      "Each call runs one statement inside BEGIN READ ONLY with a row limit. " +
+      "Configure the Postgres role with SELECT-only privileges; statements that succeed under read-only mode are allowed.",
     presentation: {
       label: {
         pending: "Running SQL query",

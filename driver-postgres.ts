@@ -39,6 +39,8 @@ function poolConfig(config: PostgresConfig): pg.PoolConfig {
     max: 4,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
+    // Дополнительный барьер: даже вне BEGIN READ ONLY новые транзакции read-only.
+    options: "-c default_transaction_read_only=on",
   };
 }
 
@@ -461,10 +463,15 @@ export async function runQuery(
   try {
     await client.query("BEGIN READ ONLY");
     await client.query(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(timeoutMs))}`);
-    const result = await client.query(sql);
+    // Extended protocol: одна команда на вызов; simple query допускает multi-statement.
+    const rawResult = await client.query({ text: sql, values: [] });
+    if (Array.isArray(rawResult)) {
+      throw new Error("Multiple SQL statements per call are not allowed.");
+    }
+    const result = rawResult;
     await client.query("COMMIT");
 
-    const columns = result.fields.map((field) => field.name);
+    const columns = (result.fields ?? []).map((field) => field.name);
     const truncated = result.rows.length > limitRows;
     const sliced = truncated ? result.rows.slice(0, limitRows) : result.rows;
     const rows = sliced.map((row) => serializeRow(columns, row));

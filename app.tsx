@@ -19,7 +19,7 @@ function SqlThreadQueryPanel() {
 const queryActionRegistration = {
   id: "sql",
   title: "SQL",
-  icon: "Database",
+  icon: "Layers",
   layout: "flush" as const,
   component: SqlThreadQueryPanel,
 };
@@ -29,7 +29,7 @@ export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "sql",
     title: "SQL",
-    icon: "Database",
+    icon: "Layers",
     path: "sql",
     component: SqlExplorerPage,
     fixedTabs: [

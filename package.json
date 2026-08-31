@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-sql",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "SQLTools-style Postgres panel for bb: browse schemas/tables and run SQL. Read-only until 0.5 (INSERT/UPDATE/DELETE planned then) — see ROADMAP.md. Agents: sql_query + sql_list_connections.",
   "license": "MIT",
   "type": "module",
@@ -16,7 +16,7 @@
     "name": "SQL",
     "description": "Postgres in bb: browse schemas and run SQL. Read-only until 0.5 — see ROADMAP for controlled write.",
     "branding": {
-      "icon": "Database"
+      "icon": "Layers"
     },
     "server": "./server.ts",
     "app": "./app.tsx",
@@ -30,6 +30,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "pg": "^8.23.0",
+    "pg-cloudflare": "^1.4.0",
     "tailwind-merge": "^3.4.0",
     "zod": "^4.3.6"
   },
