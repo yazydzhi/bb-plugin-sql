@@ -66,7 +66,7 @@ credential/trust work that remains before 0.4.
 Still **read-only** execution. Copy-paste write aids only.
 
 - [x] Bookmarks (save / load / delete from Query toolbar)
-- [ ] Query parameters (`:name` / prompts)
+- [x] Query parameters (`:name` / prompts) — see **0.4.2**
 - [x] Generate INSERT template (copy-paste aid; execution stays read-only)
 - [x] Views in the tree (separate **Tables** / **Views** groups); light SQL format
 - [x] Query toolbar layout: Open → connection → connect icons → History/Bookmarks block → Run;
@@ -81,6 +81,12 @@ Still **read-only** execution. Copy-paste write aids only.
   buffer has more than one query; **Run** / ⌘Enter executes selection, else the
   highlighted statement, else the whole buffer. A selection with several
   statements runs them **one by one** (new result tab each; stop on first error)
+
+### 0.4.2
+
+- [x] **Query parameters:** `:name` placeholders (not Postgres `::cast`); prompt
+  before Run / auto-run; numbers / booleans / `null` unquoted; other values as
+  SQL strings; last values remembered for the session
 
 ## 0.5 — Controlled write
 

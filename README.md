@@ -43,9 +43,10 @@ bb plugin install git:https://github.com/yazydzhi/bb-plugin-sql.git@^0.1.0
    edit SQL and press **Run** or ⌘/Ctrl+Enter. With several statements separated
    by `;`, the active one under the caret is highlighted; **Run** executes the
    selection if any, otherwise that statement. A multi-statement selection runs
-   each statement sequentially (one result tab each). Use **History** to re-run
-   past queries. **Open .sql…** loads a local file into the editor (honors
-   `-- @conn Name` if present).
+   each statement sequentially (one result tab each). Placeholders like
+   `:name` open a parameter dialog before run (`::type` casts are left alone).
+   Use **History** to re-run past queries. **Open .sql…** loads a local file into
+   the editor (honors `-- @conn Name` if present).
 5. Open a `.sql` file via the **host** file flow (not the Files panel’s built-in
    preview) — pick a connection in the SQL file toolbar, or put
    `-- @conn ConnectionName` in the first lines as a default hint.

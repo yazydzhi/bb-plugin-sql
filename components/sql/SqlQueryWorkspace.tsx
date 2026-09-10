@@ -35,6 +35,10 @@ import {
   resolveActiveHighlightRange,
   resolveExecutableStatements,
 } from "@/lib/sql-statements";
+import {
+  applySqlParams,
+  extractSqlParamNamesFromQueries,
+} from "@/lib/sql-parameters";
 import { useOfflineStatusFade } from "@/hooks/use-offline-status-fade";
 import { SqlCodeEditor, type SqlEditorSelection } from "./SqlCodeEditor";
 import { connectOrReconnectWithPasswordPrompt } from "./connect-helpers";
@@ -147,6 +151,10 @@ export function SqlQueryWorkspace() {
   } | null>(null);
   const [bookmarkTitle, setBookmarkTitle] = useState("");
   const [bookmarkSaving, setBookmarkSaving] = useState(false);
+  const [paramPrompt, setParamPrompt] = useState<{
+    names: string[];
+    values: Record<string, string>;
+  } | null>(null);
   const [editorRatio, setEditorRatio] = useState(DEFAULT_EDITOR_RATIO);
   const [editorSelection, setEditorSelection] = useState<SqlEditorSelection>({
     selectionStart: 0,
@@ -160,6 +168,10 @@ export function SqlQueryWorkspace() {
   connectionsRef.current = connections;
   const editorSelectionRef = useRef(editorSelection);
   editorSelectionRef.current = editorSelection;
+  const lastParamValuesRef = useRef<Record<string, string>>({});
+  const paramResolveRef = useRef<
+    ((values: Record<string, string> | null) => void) | null
+  >(null);
 
   const activeHighlightRange = useMemo(
     () =>
@@ -275,11 +287,54 @@ export function SqlQueryWorkspace() {
     [connections, patchConnectionStatus, rpc, refreshHistory],
   );
 
+  const promptForSqlParams = useCallback((names: string[]) => {
+    return new Promise<Record<string, string> | null>((resolve) => {
+      paramResolveRef.current = resolve;
+      const values: Record<string, string> = {};
+      for (const name of names) {
+        values[name] = lastParamValuesRef.current[name] ?? "";
+      }
+      setParamPrompt({ names, values });
+    });
+  }, []);
+
+  const finishParamPrompt = useCallback((values: Record<string, string> | null) => {
+    const resolve = paramResolveRef.current;
+    paramResolveRef.current = null;
+    setParamPrompt(null);
+    resolve?.(values);
+  }, []);
+
+  const runQueriesWithParams = useCallback(
+    async (connectionId: string, queries: string[]) => {
+      const names = extractSqlParamNamesFromQueries(queries);
+      let prepared = queries;
+      if (names.length > 0) {
+        const values = await promptForSqlParams(names);
+        if (!values) {
+          return;
+        }
+        lastParamValuesRef.current = {
+          ...lastParamValuesRef.current,
+          ...values,
+        };
+        try {
+          prepared = queries.map((query) => applySqlParams(query, values));
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : String(error));
+          return;
+        }
+      }
+      await runSqlBatch(connectionId, prepared);
+    },
+    [promptForSqlParams, runSqlBatch],
+  );
+
   const runSqlWith = useCallback(
     async (connectionId: string, query: string) => {
-      await runSqlBatch(connectionId, [query]);
+      await runQueriesWithParams(connectionId, [query]);
     },
-    [runSqlBatch],
+    [runQueriesWithParams],
   );
 
   const applyDraft = useCallback(async () => {
@@ -487,7 +542,7 @@ export function SqlQueryWorkspace() {
       selectionStart,
       selectionEnd,
     );
-    await runSqlBatch(selectedId, statements);
+    await runQueriesWithParams(selectedId, statements);
   }
 
   function closeResultTab(tabId: string) {
@@ -1259,6 +1314,76 @@ export function SqlQueryWorkspace() {
           )}
         </div>
       </div>
+
+      <Dialog
+        open={paramPrompt !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            finishParamPrompt(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Query parameters</DialogTitle>
+            <DialogDescription>
+              Fill values for <code className="text-xs">:name</code> placeholders.
+              Use <code className="text-xs">null</code> for SQL NULL; numbers and
+              booleans are unquoted.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3 py-1">
+            {paramPrompt?.names.map((name) => (
+              <label key={name} className="flex flex-col gap-1 text-xs">
+                <span className="font-mono text-muted-foreground">:{name}</span>
+                <Input
+                  autoFocus={name === paramPrompt.names[0]}
+                  value={paramPrompt.values[name] ?? ""}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setParamPrompt((current) =>
+                      current
+                        ? {
+                            ...current,
+                            values: { ...current.values, [name]: value },
+                          }
+                        : current,
+                    );
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      if (paramPrompt) {
+                        finishParamPrompt(paramPrompt.values);
+                      }
+                    }
+                  }}
+                  placeholder="value"
+                />
+              </label>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => finishParamPrompt(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                if (paramPrompt) {
+                  finishParamPrompt(paramPrompt.values);
+                }
+              }}
+            >
+              Run
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={bookmarkDraft !== null}
