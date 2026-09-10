@@ -40,8 +40,12 @@ bb plugin install git:https://github.com/yazydzhi/bb-plugin-sql.git@^0.1.0
 3. Expand a schema; click a table to push `SELECT … LIMIT 100` into the **Query**
    tab (right panel on the SQL page), or use ⋮ → **Show records** / **Describe**.
 4. In **Query** (sidebar fixed tab) or a thread’s **New tab → Actions → SQL**,
-   edit SQL and press **Run** or ⌘/Ctrl+Enter. Use **History** to re-run past queries.
-   **Open .sql…** loads a local file into the editor (honors `-- @conn Name` if present).
+   edit SQL and press **Run** or ⌘/Ctrl+Enter. With several statements separated
+   by `;`, the active one under the caret is highlighted; **Run** executes the
+   selection if any, otherwise that statement. A multi-statement selection runs
+   each statement sequentially (one result tab each). Use **History** to re-run
+   past queries. **Open .sql…** loads a local file into the editor (honors
+   `-- @conn Name` if present).
 5. Open a `.sql` file via the **host** file flow (not the Files panel’s built-in
    preview) — pick a connection in the SQL file toolbar, or put
    `-- @conn ConnectionName` in the first lines as a default hint.

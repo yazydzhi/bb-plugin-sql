@@ -74,6 +74,14 @@ Still **read-only** execution. Copy-paste write aids only.
 - [x] **Run from chat:** message / selection **Run SQL** → pick connection →
   open/focus SQL Actions panel → auto-run → new result tab (read-only)
 
+### 0.4.1
+
+- [x] **Multi-statement editor:** split on `;` (strings / comments / dollar-quotes);
+  highlight the statement under the caret (or the current selection) when the
+  buffer has more than one query; **Run** / ⌘Enter executes selection, else the
+  highlighted statement, else the whole buffer. A selection with several
+  statements runs them **one by one** (new result tab each; stop on first error)
+
 ## 0.5 — Controlled write
 
 First release that can mutate data. Default stays safe; write is opt-in.

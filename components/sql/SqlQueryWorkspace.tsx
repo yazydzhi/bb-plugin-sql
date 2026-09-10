@@ -31,8 +31,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { parseConnHint } from "@/lib/parse-conn-hint";
 import { formatSqlLight } from "@/lib/format-sql-light";
+import {
+  resolveActiveHighlightRange,
+  resolveExecutableStatements,
+} from "@/lib/sql-statements";
 import { useOfflineStatusFade } from "@/hooks/use-offline-status-fade";
-import { SqlCodeEditor } from "./SqlCodeEditor";
+import { SqlCodeEditor, type SqlEditorSelection } from "./SqlCodeEditor";
 import { connectOrReconnectWithPasswordPrompt } from "./connect-helpers";
 import {
   copyText,
@@ -144,12 +148,28 @@ export function SqlQueryWorkspace() {
   const [bookmarkTitle, setBookmarkTitle] = useState("");
   const [bookmarkSaving, setBookmarkSaving] = useState(false);
   const [editorRatio, setEditorRatio] = useState(DEFAULT_EDITOR_RATIO);
+  const [editorSelection, setEditorSelection] = useState<SqlEditorSelection>({
+    selectionStart: 0,
+    selectionEnd: 0,
+  });
   const autoRunRef = useRef(false);
   const openSqlInputRef = useRef<HTMLInputElement | null>(null);
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const dragRatioRef = useRef(DEFAULT_EDITOR_RATIO);
   const connectionsRef = useRef(connections);
   connectionsRef.current = connections;
+  const editorSelectionRef = useRef(editorSelection);
+  editorSelectionRef.current = editorSelection;
+
+  const activeHighlightRange = useMemo(
+    () =>
+      resolveActiveHighlightRange(
+        sql,
+        editorSelection.selectionStart,
+        editorSelection.selectionEnd,
+      ),
+    [sql, editorSelection.selectionStart, editorSelection.selectionEnd],
+  );
 
   const selectedStatus = selectedId
     ? connectionStatusFromMap(statusById, selectedId)
@@ -197,45 +217,69 @@ export function SqlQueryWorkspace() {
     setBookmarks(items);
   }, [rpc]);
 
-  const runSqlWith = useCallback(
-    async (connectionId: string, query: string) => {
-      const trimmed = query.trim();
-      if (!trimmed) {
+  const runSqlBatch = useCallback(
+    async (connectionId: string, queries: string[]) => {
+      const statements = queries
+        .map((query) => query.trim())
+        .filter((query) => query.length > 0);
+      if (statements.length === 0) {
         toast.error("Enter a SQL query");
         return;
       }
       const connectionName =
         connections.find((item) => item.id === connectionId)?.name ?? connectionId;
       setRunning(true);
+      let lastError: string | null = null;
       try {
-        const next = await rpc.call("runQuery", {
-          connectionId,
-          sql: trimmed,
-        });
-        const tab: ResultTab = {
-          id: crypto.randomUUID(),
-          title: tabTitleFromSql(trimmed),
-          sql: trimmed,
-          connectionName,
-          result: next,
-          createdAt: Date.now(),
-        };
-        setResultTabs((current) => [...current, tab].slice(-20));
-        setActiveResultId(tab.id);
-        patchConnectionStatus(connectionId, "online");
-        await rpc.call("recordHistory", { connectionId, sql: trimmed });
+        for (let index = 0; index < statements.length; index += 1) {
+          const trimmed = statements[index]!;
+          try {
+            const next = await rpc.call("runQuery", {
+              connectionId,
+              sql: trimmed,
+            });
+            const tab: ResultTab = {
+              id: crypto.randomUUID(),
+              title: tabTitleFromSql(trimmed),
+              sql: trimmed,
+              connectionName,
+              result: next,
+              createdAt: Date.now(),
+            };
+            setResultTabs((current) => [...current, tab].slice(-20));
+            setActiveResultId(tab.id);
+            patchConnectionStatus(connectionId, "online");
+            await rpc.call("recordHistory", { connectionId, sql: trimmed });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            lastError = message;
+            toast.error(
+              statements.length > 1
+                ? `Statement ${index + 1}/${statements.length}: ${message}`
+                : message,
+            );
+            if (/connect|ECONNREFUSED|timeout|terminating/i.test(message)) {
+              patchConnectionStatus(connectionId, "offline", message);
+            }
+            break;
+          }
+        }
         await refreshHistory();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        toast.error(message);
-        if (/connect|ECONNREFUSED|timeout|terminating/i.test(message)) {
-          patchConnectionStatus(connectionId, "offline", message);
+        if (!lastError && statements.length > 1) {
+          toast.success(`Ran ${statements.length} statements`);
         }
       } finally {
         setRunning(false);
       }
     },
     [connections, patchConnectionStatus, rpc, refreshHistory],
+  );
+
+  const runSqlWith = useCallback(
+    async (connectionId: string, query: string) => {
+      await runSqlBatch(connectionId, [query]);
+    },
+    [runSqlBatch],
   );
 
   const applyDraft = useCallback(async () => {
@@ -437,7 +481,13 @@ export function SqlQueryWorkspace() {
       toast.error("Select a connection first");
       return;
     }
-    await runSqlWith(selectedId, sql);
+    const { selectionStart, selectionEnd } = editorSelectionRef.current;
+    const statements = resolveExecutableStatements(
+      sql,
+      selectionStart,
+      selectionEnd,
+    );
+    await runSqlBatch(selectedId, statements);
   }
 
   function closeResultTab(tabId: string) {
@@ -964,6 +1014,8 @@ export function SqlQueryWorkspace() {
             value={sql}
             onChange={setSql}
             onKeyDown={onEditorKeyDown}
+            onSelectionChange={setEditorSelection}
+            activeRange={activeHighlightRange}
           />
         </div>
         <div
@@ -1046,17 +1098,6 @@ export function SqlQueryWorkspace() {
                         <button
                           type="button"
                           className="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-xs text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
-                          title="Copy table with headers"
-                          onClick={() =>
-                            void copyText(resultToTsv(activeResult.result), "Table")
-                          }
-                        >
-                          <Icon name="Copy" className="size-3.5" aria-hidden />
-                          table
-                        </button>
-                        <button
-                          type="button"
-                          className="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-xs text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
                           title="Copy CSV"
                           onClick={() =>
                             void copyText(resultToCsv(activeResult.result), "CSV")
@@ -1134,8 +1175,23 @@ export function SqlQueryWorkspace() {
                     ) : (
                       <table className="w-full border-collapse text-left font-mono text-xs">
                         <thead className="sticky top-0 z-10 bg-background">
-                          <tr>
-                            <th className="w-8 border-b border-border px-1 py-1.5" aria-hidden />
+                          <tr className="group/head">
+                            <th className="w-8 border-b border-border px-1 py-1.5">
+                              <button
+                                type="button"
+                                className="inline-flex size-6 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-state-hover hover:text-foreground group-hover/head:opacity-100"
+                                title="Copy table with headers"
+                                aria-label="Copy table"
+                                onClick={() =>
+                                  void copyText(
+                                    resultToTsv(activeResult.result),
+                                    "Table",
+                                  )
+                                }
+                              >
+                                <Icon name="Copy" className="size-3" aria-hidden />
+                              </button>
+                            </th>
                             {activeResult.result.columns.map((column) => (
                               <th
                                 key={column}
