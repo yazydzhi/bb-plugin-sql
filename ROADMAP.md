@@ -59,7 +59,7 @@ credential/trust work that remains before 0.4.
 - [x] Bound memory for large result sets (cursor `FETCH` + row cap; fallback slice)
 - [x] Bound / frame agent `sql_query` output size (~24k chars, untrusted framing)
 - [x] README: recommend a SELECT-only Postgres role for connections
-- [ ] Tag **`v0.3.0`** when this lands on `main`
+- [x] Tag **`v0.3.0`** when this lands on `main`
 
 ## 0.4 — Power-user convenience
 
