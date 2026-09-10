@@ -6,10 +6,6 @@ locally (not in this repo). This file is the durable, shareable outlook.
 **Product promise (through 0.4):** **read-only** Postgres from bb — human panel +
 agent tools. `INSERT` / `UPDATE` / `DELETE` / DDL are rejected until **0.5**.
 
-**Marketplace gate:** bb-community submission happens **only after** the classic
-SQL query workflow below works end-to-end (release **0.2**), not after the
-0.1 git tag alone.
-
 ## Shipped (0.1)
 
 - Thread / New-thread **Actions → SQL** panel
@@ -23,8 +19,7 @@ SQL query workflow below works end-to-end (release **0.2**), not after the
 
 ## 0.2 — Classic SQL query workflow
 
-Match the day-to-day SQLTools-style flow without leaving bb. This slice is
-what we mean by “classic SQL queries” for product planning.
+Match the day-to-day SQLTools-style flow without leaving bb.
 
 - [x] **Layout split:** left **nav panel** = connections + schema tree;
   right **Actions panel** / fixed **Query** tab = editor + result tabs
@@ -34,17 +29,37 @@ what we mean by “classic SQL queries” for product planning.
 - [x] **`.sql` file opener:** run selection / whole file (still read-only);
   optional `-- @conn Name` header
 - [x] Free-form read-only SQL in the editor (from 0.1) kept through the split
+- [x] Public release tags `v0.2.0`–`v0.2.3`
+- [x] bb-community marketplace listing (merged)
 
-### After 0.2 — Marketplace
+## 0.3 — Editor UX, marketplace harden, credential trust
 
-- [x] Public release tag `v0.2.0`
-- [x] bb-community marketplace PR opened (`submit-a-plugin`) — awaiting review
+Still **read-only**. Combines query-pane polish that landed after 0.2 with the
+credential/trust work that remains before 0.4.
 
-## 0.3 — Credential trust
+### Done (on `main` / shipped as 0.2.3+)
 
-- [ ] Prefer not storing plaintext passwords (`askForPassword` and/or OS keychain via bb.host)
-- [ ] Connection URI (`postgresql://…`)
-- [ ] Finer SSL (CA / client cert paths)
+- [x] **SQL syntax highlighting** in the Query editor and `.sql` file raw view
+  (lightweight overlay highlighter — not Monaco)
+- [x] **Taller editor** by default (~45% of the panel)
+- [x] **Full-width resizable split** between editor and results (drag the
+  horizontal separator)
+- [x] Marketplace review hardenings (`v0.2.3`):
+  - `pg-cloudflare` as a direct dependency (`npm install --omit=optional`)
+  - `sql_query` uses extended protocol + `default_transaction_read_only=on`
+  - honest tool instructions (one statement / read-only semantics)
+  - valid branding icon (`Layers`)
+
+### Remaining for 0.3 release
+
+- [x] Prefer not storing plaintext passwords in SQLite
+  (`secrets/passwords.json` 0600 + prompt on Connect when missing)
+- [x] Connection URI (`postgresql://…` paste in the form)
+- [x] Finer SSL (CA / client cert / key paths on the host)
+- [x] Bound memory for large result sets (cursor `FETCH` + row cap; fallback slice)
+- [x] Bound / frame agent `sql_query` output size (~24k chars, untrusted framing)
+- [x] README: recommend a SELECT-only Postgres role for connections
+- [ ] Tag **`v0.3.0`** when this lands on `main`
 
 ## 0.4 — Power-user convenience
 
@@ -78,10 +93,10 @@ agent auto-write without user intent.
 |------|------------|
 | Unrestricted DDL / edit-cell grid | After 0.5 proves controlled DML |
 | Extra DB drivers | Add a registry only when a second driver is real |
-| Monaco / rich IntelliSense | High cost vs history + describe |
+| Monaco / rich IntelliSense | Light syntax highlight is in 0.3; full IDE cost not justified yet |
 | AWS IAM, Excel export | Niche until someone asks |
 
 ## Feedback
 
-Issues and PRs on the GitHub repo are welcome. Marketplace listing comes after
-the classic query workflow (0.2) is done. Writes ship in **0.5** — see above.
+Issues and PRs on the GitHub repo are welcome. The plugin is listed in
+bb-community. Writes ship in **0.5** — see above.

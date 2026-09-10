@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { parsePostgresUri } from "@/lib/parse-postgres-uri";
 import type { ConnectionForm, PublicConnection } from "./types";
 
 function Field({
@@ -35,6 +36,8 @@ export function ConnectionFormDialog({
   form,
   setForm,
   saving,
+  testing,
+  onTest,
   onSave,
 }: {
   open: boolean;
@@ -43,19 +46,58 @@ export function ConnectionFormDialog({
   form: ConnectionForm;
   setForm: (form: ConnectionForm) => void;
   saving: boolean;
+  testing: boolean;
+  onTest: () => void;
   onSave: () => void;
 }) {
+  const busy = saving || testing;
+
+  function applyUri() {
+    const parsed = parsePostgresUri(form.uriPaste);
+    if (!parsed) {
+      window.alert("Paste a postgresql:// or postgres:// URI");
+      return;
+    }
+    setForm({
+      ...form,
+      host: parsed.host,
+      port: parsed.port,
+      database: parsed.database,
+      user: parsed.user,
+      password: parsed.password.length > 0 ? parsed.password : form.password,
+      ssl: parsed.ssl || form.ssl,
+      uriPaste: "",
+    });
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{editing ? "Edit connection" : "Add connection"}</DialogTitle>
           <DialogDescription>
-            Saved connections persist in the plugin database across reloads.
-            A live test runs before save; failed tests are not stored.
+            Passwords are stored in a 0600 secrets file next to the plugin database —
+            not in SQLite and not sent to the browser after save.
+            {editing
+              ? " Use Test to check credentials without saving."
+              : " A live test runs before save."}
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 py-2">
+          <Field label="Paste connection URI (optional)">
+            <div className="flex gap-2">
+              <Input
+                value={form.uriPaste}
+                onChange={(event) =>
+                  setForm({ ...form, uriPaste: event.target.value })
+                }
+                placeholder="postgresql://user:pass@host:5432/db?sslmode=require"
+              />
+              <Button type="button" variant="outline" onClick={applyUri} disabled={busy}>
+                Apply
+              </Button>
+            </div>
+          </Field>
           <Field label="Name">
             <Input
               value={form.name}
@@ -89,7 +131,15 @@ export function ConnectionFormDialog({
               onChange={(event) => setForm({ ...form, user: event.target.value })}
             />
           </Field>
-          <Field label={editing ? "Password (leave blank to keep)" : "Password"}>
+          <Field
+            label={
+              editing
+                ? editing.hasPassword
+                  ? "Password (leave blank to keep)"
+                  : "Password (not stored yet)"
+                : "Password (empty OK for trust auth)"
+            }
+          >
             <Input
               type="password"
               value={form.password}
@@ -105,14 +155,61 @@ export function ConnectionFormDialog({
             />
             Use SSL
           </label>
+          {form.ssl ? (
+            <div className="grid gap-2 rounded border border-border p-2">
+              <p className="text-xs text-muted-foreground">
+                Optional PEM paths on the bb host (verify-full style when CA is set).
+              </p>
+              <Field label="CA path">
+                <Input
+                  value={form.sslCaPath}
+                  onChange={(event) =>
+                    setForm({ ...form, sslCaPath: event.target.value })
+                  }
+                  placeholder="/path/to/ca.pem"
+                />
+              </Field>
+              <Field label="Client cert path">
+                <Input
+                  value={form.sslCertPath}
+                  onChange={(event) =>
+                    setForm({ ...form, sslCertPath: event.target.value })
+                  }
+                  placeholder="/path/to/client-cert.pem"
+                />
+              </Field>
+              <Field label="Client key path">
+                <Input
+                  value={form.sslKeyPath}
+                  onChange={(event) =>
+                    setForm({ ...form, sslKeyPath: event.target.value })
+                  }
+                  placeholder="/path/to/client-key.pem"
+                />
+              </Field>
+            </div>
+          ) : null}
         </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+        <DialogFooter className="gap-2 sm:justify-between">
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
             Cancel
           </Button>
-          <Button disabled={saving} onClick={onSave}>
-            {saving ? "Testing & saving…" : "Test & save"}
-          </Button>
+          <div className="flex flex-wrap justify-end gap-2">
+            {editing ? (
+              <Button variant="outline" disabled={busy} onClick={onTest}>
+                {testing ? "Testing…" : "Test"}
+              </Button>
+            ) : null}
+            <Button disabled={busy} onClick={onSave}>
+              {saving
+                ? editing
+                  ? "Saving…"
+                  : "Testing & saving…"
+                : editing
+                  ? "Save"
+                  : "Test & save"}
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -1,7 +1,9 @@
 // bb-plugin-sql — backend: connection CRUD, browse, read-only SQL, agent tools.
+import path from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
+  buildSslConfig,
   closeAllPools,
   connectPool,
   disconnectPool,
@@ -19,6 +21,12 @@ import {
   testConnection as driverTestConnection,
   type PostgresConfig,
 } from "./driver-postgres.js";
+import {
+  deleteConnectionPassword,
+  getConnectionPassword,
+  hasConnectionPassword,
+  setConnectionPassword,
+} from "./lib/connection-secrets.js";
 import { parseConnHint } from "./lib/parse-conn-hint.js";
 
 const connectionPublicSchema = z
@@ -30,6 +38,10 @@ const connectionPublicSchema = z
     database: z.string(),
     user: z.string(),
     ssl: z.boolean(),
+    sslCaPath: z.string().nullable(),
+    sslCertPath: z.string().nullable(),
+    sslKeyPath: z.string().nullable(),
+    hasPassword: z.boolean(),
     createdAt: z.string(),
   })
   .strict();
@@ -37,6 +49,12 @@ const connectionPublicSchema = z
 const connectionListItemSchema = connectionPublicSchema.extend({
   connected: z.boolean(),
 });
+
+const sslPathsSchema = {
+  sslCaPath: z.string().optional().nullable(),
+  sslCertPath: z.string().optional().nullable(),
+  sslKeyPath: z.string().optional().nullable(),
+};
 
 const connectionInputSchema = z
   .object({
@@ -47,6 +65,7 @@ const connectionInputSchema = z
     user: z.string().min(1),
     password: z.string(),
     ssl: z.boolean().default(false),
+    ...sslPathsSchema,
   })
   .strict();
 
@@ -58,9 +77,10 @@ const updateConnectionInputSchema = z
     port: z.number().int().min(1).max(65535),
     database: z.string().min(1),
     user: z.string().min(1),
-    // Пустой/отсутствующий пароль = оставить прежний.
+    // Пустой/отсутствующий пароль = оставить прежний в secrets.
     password: z.string().optional(),
     ssl: z.boolean(),
+    ...sslPathsSchema,
   })
   .strict();
 
@@ -112,11 +132,18 @@ export const rpcContract = defineRpcContract({
       .strict(),
   },
   connectConnection: {
-    input: z.object({ id: z.string().min(1) }).strict(),
+    input: z
+      .object({
+        id: z.string().min(1),
+        /** Если пароль не сохранён — передать сюда для сессии. */
+        password: z.string().optional(),
+      })
+      .strict(),
     output: z
       .object({
         ok: z.boolean(),
         error: z.string().optional(),
+        needsPassword: z.boolean().optional(),
       })
       .strict(),
   },
@@ -125,15 +152,21 @@ export const rpcContract = defineRpcContract({
     output: z.object({ ok: z.literal(true) }).strict(),
   },
   reconnectConnection: {
-    input: z.object({ id: z.string().min(1) }).strict(),
+    input: z
+      .object({
+        id: z.string().min(1),
+        password: z.string().optional(),
+      })
+      .strict(),
     output: z
       .object({
         ok: z.boolean(),
         error: z.string().optional(),
+        needsPassword: z.boolean().optional(),
       })
       .strict(),
   },
-  /** Проверка параметров до сохранения (или с id — подставить пароль из хранилища). */
+  /** Проверка параметров до сохранения (или с id — подставить пароль из secrets). */
   probeConnection: {
     input: z
       .object({
@@ -144,6 +177,9 @@ export const rpcContract = defineRpcContract({
         user: z.string().min(1),
         password: z.string().optional(),
         ssl: z.boolean().default(false),
+        sslCaPath: z.string().optional().nullable(),
+        sslCertPath: z.string().optional().nullable(),
+        sslKeyPath: z.string().optional().nullable(),
       })
       .strict(),
     output: z
@@ -368,8 +404,12 @@ type ConnectionRow = {
   port: number;
   database: string;
   user: string;
+  /** Устарело: пароль в SQLite; после миграции всегда "". */
   password: string;
   ssl: number;
+  ssl_ca_path: string | null;
+  ssl_cert_path: string | null;
+  ssl_key_path: string | null;
   created_at: string;
 };
 
@@ -381,31 +421,19 @@ type PublicConnection = {
   database: string;
   user: string;
   ssl: boolean;
+  sslCaPath: string | null;
+  sslCertPath: string | null;
+  sslKeyPath: string | null;
+  hasPassword: boolean;
   createdAt: string;
 };
 
-function toPublic(row: ConnectionRow): PublicConnection {
-  return {
-    id: row.id,
-    name: row.name,
-    host: row.host,
-    port: row.port,
-    database: row.database,
-    user: row.user,
-    ssl: row.ssl === 1,
-    createdAt: row.created_at,
-  };
-}
+const CONNECTION_SELECT = `id, name, host, port, database, "user", password, ssl,
+  ssl_ca_path, ssl_cert_path, ssl_key_path, created_at`;
 
-function toConfig(row: ConnectionRow): PostgresConfig {
-  return {
-    host: row.host,
-    port: row.port,
-    database: row.database,
-    user: row.user,
-    password: row.password,
-    ssl: row.ssl === 1,
-  };
+function normalizePath(value: string | null | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 export default async function plugin(bb: BbPluginApi) {
@@ -435,7 +463,87 @@ export default async function plugin(bb: BbPluginApi) {
       sql TEXT NOT NULL,
       created_at TEXT NOT NULL
     )`,
+    `ALTER TABLE connections ADD COLUMN ssl_ca_path TEXT`,
+    `ALTER TABLE connections ADD COLUMN ssl_cert_path TEXT`,
+    `ALTER TABLE connections ADD COLUMN ssl_key_path TEXT`,
   ]);
+
+  const pluginDataDir = path.dirname(String((db as { name?: string }).name ?? ""));
+  if (!pluginDataDir || pluginDataDir === "." || pluginDataDir === "") {
+    throw new Error("Could not resolve plugin data directory from SQLite path");
+  }
+
+  // Одноразовая миграция: пароли из SQLite → secrets/passwords.json (0600).
+  {
+    const legacy = db
+      .prepare(
+        `SELECT id, password FROM connections WHERE password IS NOT NULL AND password != ''`,
+      )
+      .all() as { id: string; password: string }[];
+    for (const row of legacy) {
+      if (!hasConnectionPassword(pluginDataDir, row.id)) {
+        setConnectionPassword(pluginDataDir, row.id, row.password);
+      }
+    }
+    if (legacy.length > 0) {
+      db.prepare(`UPDATE connections SET password = ''`).run();
+      bb.log.info(`migrated ${legacy.length} connection password(s) to secrets file`);
+    }
+  }
+
+  function toPublic(row: ConnectionRow): PublicConnection {
+    return {
+      id: row.id,
+      name: row.name,
+      host: row.host,
+      port: row.port,
+      database: row.database,
+      user: row.user,
+      ssl: row.ssl === 1,
+      sslCaPath: row.ssl_ca_path,
+      sslCertPath: row.ssl_cert_path,
+      sslKeyPath: row.ssl_key_path,
+      hasPassword: hasConnectionPassword(pluginDataDir, row.id),
+      createdAt: row.created_at,
+    };
+  }
+
+  function toConfig(row: ConnectionRow, password: string): PostgresConfig {
+    return {
+      host: row.host,
+      port: row.port,
+      database: row.database,
+      user: row.user,
+      password,
+      ssl:
+        buildSslConfig({
+          ssl: row.ssl === 1,
+          sslCaPath: row.ssl_ca_path,
+          sslCertPath: row.ssl_cert_path,
+          sslKeyPath: row.ssl_key_path,
+        }) ?? false,
+    };
+  }
+
+  /**
+   * Пароль: явный session → secrets → (legacy SQLite, если ещё не мигрировали).
+   */
+  function resolvePassword(
+    row: ConnectionRow,
+    sessionPassword?: string,
+  ): { password: string } | { needsPassword: true } {
+    if (sessionPassword !== undefined) {
+      return { password: sessionPassword };
+    }
+    const stored = getConnectionPassword(pluginDataDir, row.id);
+    if (stored !== undefined) {
+      return { password: stored };
+    }
+    if (row.password.length > 0) {
+      return { password: row.password };
+    }
+    return { needsPassword: true };
+  }
 
   function getPref(key: string): string | null {
     const row = db
@@ -536,7 +644,7 @@ export default async function plugin(bb: BbPluginApi) {
   function listRows(): ConnectionRow[] {
     const rows = db
       .prepare(
-        `SELECT id, name, host, port, database, "user", password, ssl, created_at
+        `SELECT ${CONNECTION_SELECT}
          FROM connections
          ORDER BY created_at ASC`,
       )
@@ -547,7 +655,7 @@ export default async function plugin(bb: BbPluginApi) {
   function getRow(id: string): ConnectionRow | undefined {
     return db
       .prepare(
-        `SELECT id, name, host, port, database, "user", password, ssl, created_at
+        `SELECT ${CONNECTION_SELECT}
          FROM connections
          WHERE id = ?`,
       )
@@ -561,7 +669,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     return db
       .prepare(
-        `SELECT id, name, host, port, database, "user", password, ssl, created_at
+        `SELECT ${CONNECTION_SELECT}
          FROM connections
          WHERE name = ?
          LIMIT 1`,
@@ -593,7 +701,13 @@ export default async function plugin(bb: BbPluginApi) {
     if (existing) {
       return existing;
     }
-    const result = await connectPool(row.id, toConfig(row));
+    const resolved = resolvePassword(row);
+    if ("needsPassword" in resolved) {
+      throw new Error(
+        `Connection "${row.name}" has no stored password. Connect from the SQL panel first.`,
+      );
+    }
+    const result = await connectPool(row.id, toConfig(row, resolved.password));
     if (!result.ok) {
       throw new Error(result.error);
     }
@@ -616,10 +730,14 @@ export default async function plugin(bb: BbPluginApi) {
     createConnection: (input) => {
       const id = crypto.randomUUID();
       const createdAt = new Date().toISOString();
+      const sslCaPath = normalizePath(input.sslCaPath);
+      const sslCertPath = normalizePath(input.sslCertPath);
+      const sslKeyPath = normalizePath(input.sslKeyPath);
       db.prepare(
         `INSERT INTO connections
-         (id, name, host, port, database, "user", password, ssl, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, name, host, port, database, "user", password, ssl,
+          ssl_ca_path, ssl_cert_path, ssl_key_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)`,
       ).run(
         id,
         input.name,
@@ -627,10 +745,13 @@ export default async function plugin(bb: BbPluginApi) {
         input.port,
         input.database,
         input.user,
-        input.password,
         input.ssl ? 1 : 0,
+        sslCaPath,
+        sslCertPath,
+        sslKeyPath,
         createdAt,
       );
+      setConnectionPassword(pluginDataDir, id, input.password);
       const order = getConnectionOrder();
       if (!order.includes(id)) {
         setConnectionOrder([...order, id]);
@@ -640,14 +761,14 @@ export default async function plugin(bb: BbPluginApi) {
     },
 
     updateConnection: async (input) => {
-      const existing = requireRow(input.id);
-      const password =
-        input.password !== undefined && input.password.length > 0
-          ? input.password
-          : existing.password;
+      requireRow(input.id);
+      const sslCaPath = normalizePath(input.sslCaPath);
+      const sslCertPath = normalizePath(input.sslCertPath);
+      const sslKeyPath = normalizePath(input.sslKeyPath);
       db.prepare(
         `UPDATE connections
-         SET name = ?, host = ?, port = ?, database = ?, "user" = ?, password = ?, ssl = ?
+         SET name = ?, host = ?, port = ?, database = ?, "user" = ?, password = '',
+             ssl = ?, ssl_ca_path = ?, ssl_cert_path = ?, ssl_key_path = ?
          WHERE id = ?`,
       ).run(
         input.name,
@@ -655,17 +776,24 @@ export default async function plugin(bb: BbPluginApi) {
         input.port,
         input.database,
         input.user,
-        password,
         input.ssl ? 1 : 0,
+        sslCaPath,
+        sslCertPath,
+        sslKeyPath,
         input.id,
       );
+      if (input.password !== undefined) {
+        setConnectionPassword(pluginDataDir, input.id, input.password);
+      }
       await dropPool(input.id);
+      publishUi();
       return { connection: toPublic(requireRow(input.id)) };
     },
 
     deleteConnection: async ({ id }) => {
       requireRow(id);
       db.prepare(`DELETE FROM connections WHERE id = ?`).run(id);
+      deleteConnectionPassword(pluginDataDir, id);
       setConnectionOrder(getConnectionOrder().filter((item) => item !== id));
       await dropPool(id);
       publishUi();
@@ -674,7 +802,14 @@ export default async function plugin(bb: BbPluginApi) {
 
     testConnection: async ({ id }) => {
       const row = requireRow(id);
-      const result = await driverTestConnection(toConfig(row));
+      const resolved = resolvePassword(row);
+      if ("needsPassword" in resolved) {
+        return {
+          ok: false,
+          error: "No stored password — edit the connection or Connect with a password",
+        };
+      }
+      const result = await driverTestConnection(toConfig(row, resolved.password));
       if (result.ok) {
         return { ok: true };
       }
@@ -686,9 +821,13 @@ export default async function plugin(bb: BbPluginApi) {
       return { connected: isConnected(id) };
     },
 
-    connectConnection: async ({ id }) => {
+    connectConnection: async ({ id, password }) => {
       const row = requireRow(id);
-      const result = await connectPool(id, toConfig(row));
+      const resolved = resolvePassword(row, password);
+      if ("needsPassword" in resolved) {
+        return { ok: false, needsPassword: true, error: "Password required" };
+      }
+      const result = await connectPool(id, toConfig(row, resolved.password));
       publishUi();
       if (result.ok) {
         return { ok: true };
@@ -703,9 +842,13 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const };
     },
 
-    reconnectConnection: async ({ id }) => {
+    reconnectConnection: async ({ id, password }) => {
       const row = requireRow(id);
-      const result = await reconnectPool(id, toConfig(row));
+      const resolved = resolvePassword(row, password);
+      if ("needsPassword" in resolved) {
+        return { ok: false, needsPassword: true, error: "Password required" };
+      }
+      const result = await reconnectPool(id, toConfig(row, resolved.password));
       publishUi();
       if (result.ok) {
         return { ok: true };
@@ -719,7 +862,11 @@ export default async function plugin(bb: BbPluginApi) {
         if (!input.id) {
           return { ok: false, error: "Password is required to probe a new connection" };
         }
-        password = requireRow(input.id).password;
+        const resolved = resolvePassword(requireRow(input.id));
+        if ("needsPassword" in resolved) {
+          return { ok: false, error: "No stored password for this connection" };
+        }
+        password = resolved.password;
       }
       const result = await driverTestConnection({
         host: input.host,
@@ -727,7 +874,13 @@ export default async function plugin(bb: BbPluginApi) {
         database: input.database,
         user: input.user,
         password,
-        ssl: input.ssl,
+        ssl:
+          buildSslConfig({
+            ssl: input.ssl,
+            sslCaPath: input.sslCaPath,
+            sslCertPath: input.sslCertPath,
+            sslKeyPath: input.sslKeyPath,
+          }) ?? false,
       });
       if (result.ok) {
         return { ok: true };
@@ -780,7 +933,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (mode === "free") {
         const rows = db
           .prepare(
-            `SELECT id, name, host, port, database, "user", password, ssl, created_at
+            `SELECT ${CONNECTION_SELECT}
              FROM connections
              ORDER BY created_at ASC`,
           )

@@ -7,6 +7,10 @@ export type PublicConnection = {
   database: string;
   user: string;
   ssl: boolean;
+  sslCaPath: string | null;
+  sslCertPath: string | null;
+  sslKeyPath: string | null;
+  hasPassword: boolean;
   createdAt: string;
 };
 
@@ -93,6 +97,11 @@ export type ConnectionForm = {
   user: string;
   password: string;
   ssl: boolean;
+  sslCaPath: string;
+  sslCertPath: string;
+  sslKeyPath: string;
+  /** Временное поле: paste URI (не сохраняется). */
+  uriPaste: string;
 };
 
 export type ResultTab = {
@@ -121,6 +130,10 @@ export function emptyForm(): ConnectionForm {
     user: "postgres",
     password: "",
     ssl: false,
+    sslCaPath: "",
+    sslCertPath: "",
+    sslKeyPath: "",
+    uriPaste: "",
   };
 }
 

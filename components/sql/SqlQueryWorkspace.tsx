@@ -21,6 +21,7 @@ import {
 import { parseConnHint } from "@/lib/parse-conn-hint";
 import { useOfflineStatusFade } from "@/hooks/use-offline-status-fade";
 import { SqlCodeEditor } from "./SqlCodeEditor";
+import { connectOrReconnectWithPasswordPrompt } from "./connect-helpers";
 import {
   copyText,
   downloadResultCsv,
@@ -72,6 +73,8 @@ export function SqlQueryWorkspace() {
   const openSqlInputRef = useRef<HTMLInputElement | null>(null);
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const dragRatioRef = useRef(DEFAULT_EDITOR_RATIO);
+  const connectionsRef = useRef(connections);
+  connectionsRef.current = connections;
 
   const selectedStatus = selectedId
     ? connectionStatusFromMap(statusById, selectedId)
@@ -219,7 +222,16 @@ export function SqlQueryWorkspace() {
           patchConnectionStatus(selectedId, "online");
           return;
         }
-        const outcome = await rpc.call("connectConnection", { id: selectedId });
+        const connection = connectionsRef.current.find(
+          (item) => item.id === selectedId,
+        );
+        const outcome = connection
+          ? await connectOrReconnectWithPasswordPrompt({
+              rpc,
+              method: "connectConnection",
+              connection,
+            })
+          : await rpc.call("connectConnection", { id: selectedId });
         if (cancelled) {
           return;
         }
@@ -260,9 +272,17 @@ export function SqlQueryWorkspace() {
     if (!selectedId) {
       return;
     }
+    const connection = connections.find((item) => item.id === selectedId);
+    if (!connection) {
+      return;
+    }
     patchConnectionStatus(selectedId, "checking");
     try {
-      const outcome = await rpc.call("connectConnection", { id: selectedId });
+      const outcome = await connectOrReconnectWithPasswordPrompt({
+        rpc,
+        method: "connectConnection",
+        connection,
+      });
       if (outcome.ok) {
         patchConnectionStatus(selectedId, "online");
         toast.success("Connected");
@@ -300,9 +320,17 @@ export function SqlQueryWorkspace() {
     if (!selectedId) {
       return;
     }
+    const connection = connections.find((item) => item.id === selectedId);
+    if (!connection) {
+      return;
+    }
     patchConnectionStatus(selectedId, "checking");
     try {
-      const outcome = await rpc.call("reconnectConnection", { id: selectedId });
+      const outcome = await connectOrReconnectWithPasswordPrompt({
+        rpc,
+        method: "reconnectConnection",
+        connection,
+      });
       if (outcome.ok) {
         patchConnectionStatus(selectedId, "online");
         toast.success("Reconnected");

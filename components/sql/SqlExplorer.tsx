@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useOfflineStatusFade } from "@/hooks/use-offline-status-fade";
 import { ConnectionFormDialog } from "./ConnectionFormDialog";
+import { connectOrReconnectWithPasswordPrompt } from "./connect-helpers";
 import { StatusDot } from "./Status";
 import {
   emptyForm,
@@ -126,6 +127,7 @@ export function SqlExplorer() {
   const [editing, setEditing] = useState<PublicConnection | null>(null);
   const [form, setForm] = useState<ConnectionForm>(emptyForm());
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [describeOpen, setDescribeOpen] = useState(false);
   const [describeTitle, setDescribeTitle] = useState("");
   const [describeDetail, setDescribeDetail] = useState<TableDetail | null>(null);
@@ -499,52 +501,141 @@ export function SqlExplorer() {
       user: connection.user,
       password: "",
       ssl: connection.ssl,
+      sslCaPath: connection.sslCaPath ?? "",
+      sslCertPath: connection.sslCertPath ?? "",
+      sslKeyPath: connection.sslKeyPath ?? "",
+      uriPaste: "",
     });
     setDialogOpen(true);
   }
 
-  async function saveConnection() {
+  function parseFormPort(): number | null {
     const port = Number(form.port);
     if (!form.name.trim() || !form.host.trim() || !form.database.trim() || !form.user.trim()) {
       toast.error("Name, host, database, and user are required");
-      return;
+      return null;
     }
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       toast.error("Port must be an integer 1–65535");
+      return null;
+    }
+    return port;
+  }
+
+  function formSslPaths() {
+    return {
+      sslCaPath: form.ssl ? form.sslCaPath.trim() || null : null,
+      sslCertPath: form.ssl ? form.sslCertPath.trim() || null : null,
+      sslKeyPath: form.ssl ? form.sslKeyPath.trim() || null : null,
+    };
+  }
+
+  /**
+   * Собирает input для probeConnection без undefined (RPC JSON их не принимает).
+   */
+  function buildProbeInput(port: number) {
+    const input: {
+      id?: string;
+      host: string;
+      port: number;
+      database: string;
+      user: string;
+      password?: string;
+      ssl: boolean;
+      sslCaPath: string | null;
+      sslCertPath: string | null;
+      sslKeyPath: string | null;
+    } = {
+      host: form.host.trim(),
+      port,
+      database: form.database.trim(),
+      user: form.user.trim(),
+      ssl: form.ssl,
+      ...formSslPaths(),
+    };
+    if (editing?.id) {
+      input.id = editing.id;
+    }
+    // При edit и пустом поле — не шлём password (подставится из secrets на сервере).
+    if (!editing || form.password.length > 0) {
+      input.password = form.password;
+    }
+    return input;
+  }
+
+  /** Только проверка полей формы (без сохранения). */
+  async function testConnectionForm() {
+    const port = parseFormPort();
+    if (port === null) {
+      return;
+    }
+    setTesting(true);
+    try {
+      const probe = await rpc.call("probeConnection", buildProbeInput(port));
+      if (probe.ok) {
+        toast.success("Connection test OK");
+      } else {
+        toast.error(probe.error ?? "Connection test failed");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  async function saveConnection() {
+    const port = parseFormPort();
+    if (port === null) {
       return;
     }
     if (!editing && form.password.length === 0) {
-      toast.error("Password is required for a new connection");
-      return;
+      // Пустой пароль допустим (trust); предупреждаем один раз.
+      if (
+        !window.confirm(
+          "Save with an empty password? (OK for local trust/peer auth)",
+        )
+      ) {
+        return;
+      }
     }
 
     setSaving(true);
     try {
-      const probe = await rpc.call("probeConnection", {
-        id: editing?.id,
-        host: form.host.trim(),
-        port,
-        database: form.database.trim(),
-        user: form.user.trim(),
-        password: form.password.length > 0 ? form.password : undefined,
-        ssl: form.ssl,
-      });
+      const sslPaths = formSslPaths();
+      const probe = await rpc.call("probeConnection", buildProbeInput(port));
       if (!probe.ok) {
         toast.error(probe.error ?? "Connection test failed — not saved");
         return;
       }
 
       if (editing) {
-        await rpc.call("updateConnection", {
+        const updateInput: {
+          id: string;
+          name: string;
+          host: string;
+          port: number;
+          database: string;
+          user: string;
+          password?: string;
+          ssl: boolean;
+          sslCaPath: string | null;
+          sslCertPath: string | null;
+          sslKeyPath: string | null;
+        } = {
           id: editing.id,
           name: form.name.trim(),
           host: form.host.trim(),
           port,
           database: form.database.trim(),
           user: form.user.trim(),
-          password: form.password.length > 0 ? form.password : undefined,
           ssl: form.ssl,
-        });
+          ...sslPaths,
+        };
+        if (form.password.length > 0) {
+          updateInput.password = form.password;
+        }
+        await rpc.call("updateConnection", updateInput);
         toast.success("Connection tested and updated");
         await selectConnection(editing.id);
       } else {
@@ -556,6 +647,7 @@ export function SqlExplorer() {
           user: form.user.trim(),
           password: form.password,
           ssl: form.ssl,
+          ...sslPaths,
         });
         await selectConnection(connection.id);
         toast.success("Connection tested and saved");
@@ -607,7 +699,11 @@ export function SqlExplorer() {
   async function connectConnection(connection: ConnectionListItem) {
     patchConnectionStatus(connection.id, "checking");
     try {
-      const outcome = await rpc.call("connectConnection", { id: connection.id });
+      const outcome = await connectOrReconnectWithPasswordPrompt({
+        rpc,
+        method: "connectConnection",
+        connection,
+      });
       if (outcome.ok) {
         patchConnectionStatus(connection.id, "online");
         clearTreeCache(connection.id);
@@ -643,8 +739,10 @@ export function SqlExplorer() {
   async function reconnectConnection(connection: ConnectionListItem) {
     patchConnectionStatus(connection.id, "checking");
     try {
-      const outcome = await rpc.call("reconnectConnection", {
-        id: connection.id,
+      const outcome = await connectOrReconnectWithPasswordPrompt({
+        rpc,
+        method: "reconnectConnection",
+        connection,
       });
       if (outcome.ok) {
         patchConnectionStatus(connection.id, "online");
@@ -1067,6 +1165,8 @@ export function SqlExplorer() {
         form={form}
         setForm={setForm}
         saving={saving}
+        testing={testing}
+        onTest={() => void testConnectionForm()}
         onSave={() => void saveConnection()}
       />
 

@@ -1,9 +1,19 @@
 // PostgreSQL driver: pool cache, introspection, read-only query execution.
-// # ponytail: plaintext-in-sqlite password storage, upgrade to OS keychain via bb.host
-//   if this plugin is ever used with prod credentials
+// Passwords live in a 0600 secrets file (see lib/connection-secrets.ts), not in
+// the query path itself.
+import fs from "node:fs";
 import pg from "pg";
 
 const { Pool } = pg;
+
+export type PostgresSslConfig =
+  | boolean
+  | {
+      rejectUnauthorized?: boolean;
+      ca?: string;
+      cert?: string;
+      key?: string;
+    };
 
 export type PostgresConfig = {
   host: string;
@@ -11,7 +21,7 @@ export type PostgresConfig = {
   database: string;
   user: string;
   password: string;
-  ssl: boolean;
+  ssl: PostgresSslConfig;
 };
 
 export type QueryResult = {
@@ -24,9 +34,49 @@ export type QueryResult = {
 
 const DEFAULT_LIMIT_ROWS = 500;
 const DEFAULT_TIMEOUT_MS = 30_000;
+/** Жёсткий потолок текста для agent tool, чтобы не раздувать контекст. */
+export const AGENT_RESULT_MAX_CHARS = 24_000;
+const AGENT_CELL_MAX_CHARS = 40;
+const AGENT_MAX_COLUMNS = 32;
 
 /** Один Pool на connection id; закрывается в bb.onDispose. */
 const pools = new Map<string, pg.Pool>();
+
+/**
+ * Собирает pg SSL-опции из флага и опциональных путей к PEM.
+ */
+export function buildSslConfig(options: {
+  ssl: boolean;
+  sslCaPath?: string | null;
+  sslCertPath?: string | null;
+  sslKeyPath?: string | null;
+}): PostgresSslConfig | undefined {
+  if (!options.ssl) {
+    return undefined;
+  }
+  const caPath = options.sslCaPath?.trim() || "";
+  const certPath = options.sslCertPath?.trim() || "";
+  const keyPath = options.sslKeyPath?.trim() || "";
+  if (!caPath && !certPath && !keyPath) {
+    return true;
+  }
+  const ssl: {
+    rejectUnauthorized: boolean;
+    ca?: string;
+    cert?: string;
+    key?: string;
+  } = { rejectUnauthorized: true };
+  if (caPath) {
+    ssl.ca = fs.readFileSync(caPath, "utf8");
+  }
+  if (certPath) {
+    ssl.cert = fs.readFileSync(certPath, "utf8");
+  }
+  if (keyPath) {
+    ssl.key = fs.readFileSync(keyPath, "utf8");
+  }
+  return ssl;
+}
 
 function poolConfig(config: PostgresConfig): pg.PoolConfig {
   return {
@@ -35,7 +85,7 @@ function poolConfig(config: PostgresConfig): pg.PoolConfig {
     database: config.database,
     user: config.user,
     password: config.password,
-    ssl: config.ssl ? true : undefined,
+    ssl: config.ssl === false ? undefined : config.ssl,
     max: 4,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
@@ -448,6 +498,7 @@ export async function describeTable(
 
 /**
  * Выполняет SQL в READ ONLY транзакции с statement_timeout и лимитом строк.
+ * Предпочитает CURSOR+FETCH, чтобы не материализовать весь результат в память.
  * Одна реализация для UI и agent tool.
  */
 export async function runQuery(
@@ -463,18 +514,34 @@ export async function runQuery(
   try {
     await client.query("BEGIN READ ONLY");
     await client.query(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(timeoutMs))}`);
-    // Extended protocol: одна команда на вызов; simple query допускает multi-statement.
-    const rawResult = await client.query({ text: sql, values: [] });
-    if (Array.isArray(rawResult)) {
-      throw new Error("Multiple SQL statements per call are not allowed.");
-    }
-    const result = rawResult;
-    await client.query("COMMIT");
 
-    const columns = (result.fields ?? []).map((field) => field.name);
-    const truncated = result.rows.length > limitRows;
-    const sliced = truncated ? result.rows.slice(0, limitRows) : result.rows;
-    const rows = sliced.map((row) => serializeRow(columns, row));
+    let columns: string[];
+    let rowsRaw: Record<string, unknown>[];
+    let truncated: boolean;
+
+    const cursorOk = await tryFetchViaCursor(client, sql, limitRows);
+    if (cursorOk) {
+      columns = cursorOk.columns;
+      rowsRaw = cursorOk.rows;
+      truncated = cursorOk.truncated;
+    } else {
+      // Ошибка DECLARE абортит транзакцию — открываем заново для fallback.
+      await client.query("ROLLBACK").catch(() => undefined);
+      await client.query("BEGIN READ ONLY");
+      await client.query(
+        `SET LOCAL statement_timeout = ${Math.max(1, Math.floor(timeoutMs))}`,
+      );
+      const rawResult = await client.query({ text: sql, values: [] });
+      if (Array.isArray(rawResult)) {
+        throw new Error("Multiple SQL statements per call are not allowed.");
+      }
+      columns = (rawResult.fields ?? []).map((field) => field.name);
+      truncated = rawResult.rows.length > limitRows;
+      rowsRaw = truncated ? rawResult.rows.slice(0, limitRows) : rawResult.rows;
+    }
+
+    await client.query("COMMIT");
+    const rows = rowsRaw.map((row) => serializeRow(columns, row));
 
     return {
       columns,
@@ -488,6 +555,50 @@ export async function runQuery(
     throw new Error(formatError(error));
   } finally {
     client.release();
+  }
+}
+
+/**
+ * DECLARE CURSOR + FETCH limit+1 — не тянет весь result set в Node.
+ * Возвращает null, если запрос нельзя обернуть в cursor.
+ */
+async function tryFetchViaCursor(
+  client: pg.PoolClient,
+  sql: string,
+  limitRows: number,
+): Promise<{ columns: string[]; rows: Record<string, unknown>[]; truncated: boolean } | null> {
+  const trimmed = sql.trim().replace(/;+\s*$/, "");
+  if (!trimmed || /;/.test(trimmed)) {
+    return null;
+  }
+
+  try {
+    await client.query({
+      text: `DECLARE __bb_sql_cur NO SCROLL CURSOR FOR\n${trimmed}`,
+      values: [],
+    });
+  } catch {
+    return null;
+  }
+
+  try {
+    const fetchCount = Math.max(1, Math.floor(limitRows)) + 1;
+    const fetched = await client.query({
+      text: `FETCH ${fetchCount} FROM __bb_sql_cur`,
+      values: [],
+    });
+    await client.query({ text: "CLOSE __bb_sql_cur", values: [] });
+
+    if (Array.isArray(fetched)) {
+      throw new Error("Unexpected multi-result FETCH");
+    }
+    const columns = (fetched.fields ?? []).map((field) => field.name);
+    const truncated = fetched.rows.length > limitRows;
+    const rows = truncated ? fetched.rows.slice(0, limitRows) : fetched.rows;
+    return { columns, rows, truncated };
+  } catch (error) {
+    await client.query({ text: "CLOSE __bb_sql_cur", values: [] }).catch(() => undefined);
+    throw error;
   }
 }
 
@@ -538,30 +649,40 @@ export function formatError(error: unknown): string {
 
 /**
  * Форматирует результат запроса в текстовую таблицу для agent tool.
+ * Данные обёрнуты как untrusted; длина жёстко ограничена.
  */
 export function formatQueryAsText(result: QueryResult): string {
+  const meta =
+    `${result.rowCount} row(s) in ${result.durationMs}ms` +
+    (result.truncated ? " (truncated at row limit)" : "");
+
   if (result.columns.length === 0) {
-    return `OK — ${result.rowCount} row(s) in ${result.durationMs}ms` +
-      (result.truncated ? " (truncated)" : "");
+    return frameAgentResult(`OK — ${meta}`);
   }
 
+  const columns = result.columns.slice(0, AGENT_MAX_COLUMNS);
+  const omittedColumns = result.columns.length - columns.length;
+
   const stringRows = result.rows.map((row) =>
-    result.columns.map((column) => cellToString(row[column])),
+    columns.map((column) => cellToString(row[column])),
   );
-  const widths = result.columns.map((column, index) => {
+  const widths = columns.map((column, index) => {
     let width = column.length;
     for (const row of stringRows) {
-      width = Math.max(width, Math.min(row[index]!.length, 40));
+      width = Math.max(width, Math.min(row[index]!.length, AGENT_CELL_MAX_CHARS));
     }
     return width;
   });
 
   const pad = (text: string, width: number) => {
-    const clipped = text.length > 40 ? `${text.slice(0, 37)}...` : text;
+    const clipped =
+      text.length > AGENT_CELL_MAX_CHARS
+        ? `${text.slice(0, AGENT_CELL_MAX_CHARS - 3)}...`
+        : text;
     return clipped.padEnd(width);
   };
 
-  const header = result.columns
+  const header = columns
     .map((column, index) => pad(column, widths[index]!))
     .join(" | ");
   const separator = widths.map((width) => "-".repeat(width)).join("-+-");
@@ -569,11 +690,26 @@ export function formatQueryAsText(result: QueryResult): string {
     .map((row) => row.map((cell, index) => pad(cell, widths[index]!)).join(" | "))
     .join("\n");
 
-  const footer =
-    `\n\n${result.rowCount} row(s) in ${result.durationMs}ms` +
-    (result.truncated ? " (truncated at limit)" : "");
+  let table = `${header}\n${separator}\n${body}\n\n${meta}`;
+  if (omittedColumns > 0) {
+    table += `\n(${omittedColumns} more column(s) omitted)`;
+  }
 
-  return `${header}\n${separator}\n${body}${footer}`;
+  if (table.length > AGENT_RESULT_MAX_CHARS) {
+    table =
+      `${table.slice(0, AGENT_RESULT_MAX_CHARS - 80)}\n\n` +
+      `… truncated for agent context (${AGENT_RESULT_MAX_CHARS} char cap)`;
+  }
+
+  return frameAgentResult(table);
+}
+
+function frameAgentResult(body: string): string {
+  return (
+    "----- BEGIN sql_query result (untrusted data) -----\n" +
+    `${body}\n` +
+    "----- END sql_query result -----"
+  );
 }
 
 function cellToString(value: unknown): string {

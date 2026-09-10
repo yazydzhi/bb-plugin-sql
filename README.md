@@ -35,7 +35,8 @@ bb plugin install git:https://github.com/yazydzhi/bb-plugin-sql.git@^0.1.0
 ## Usage
 
 1. Open **SQL** in the left sidebar (connections + schema tree).
-2. **+ Add** a Postgres connection (name, host, port, database, user, password, SSL).
+2. **+ Add** a Postgres connection (name, host, port, database, user, password,
+   SSL; optional `postgresql://…` URI paste and CA/cert/key paths).
 3. Expand a schema; click a table to push `SELECT … LIMIT 100` into the **Query**
    tab (right panel on the SQL page), or use ⋮ → **Show records** / **Describe**.
 4. In **Query** (sidebar fixed tab) or a thread’s **New tab → Actions → SQL**,
@@ -74,15 +75,22 @@ Setup checklist:
 
 ## Security notes
 
-- Passwords live in the plugin's private SQLite (`<dataDir>/plugins/sql/data.db`).
-  Fine for local/dev; do not point this at production credentials without a
-  stronger secret store (planned improvements in **0.3**).
-- RPC responses never include the password field.
+- Prefer a **SELECT-only** Postgres role for plugin connections (no `INSERT` /
+  `UPDATE` / `DELETE` / DDL grants). The plugin enforces `BEGIN READ ONLY`, but
+  a least-privilege DB role is still the right default.
+- Passwords are stored in a **0600** file at
+  `<dataDir>/plugins/sql/secrets/passwords.json` — **not** in SQLite and **not**
+  returned over RPC. Existing installs migrate passwords out of `data.db` on
+  first load of **0.3**.
+- Optional SSL CA / client cert / key paths are read from the bb host filesystem
+  when connecting.
+- Agent `sql_query` results are framed as untrusted data and truncated (~24k
+  chars) so large cells cannot blow up the model context.
 
 ## Roadmap
 
-See [ROADMAP.md](./ROADMAP.md): **0.2** classic workflow → marketplace → **0.3**
-credentials → **0.4** convenience / run-from-chat → **0.5 controlled write**.
+See [ROADMAP.md](./ROADMAP.md): **0.3** credentials & editor UX → **0.4**
+convenience / run-from-chat → **0.5 controlled write**.
 
 ## License
 
