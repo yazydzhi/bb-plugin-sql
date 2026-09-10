@@ -3,8 +3,9 @@
 Public plan for **bb-plugin-sql**. Day-to-day AJTBD notes and checklists live
 locally (not in this repo). This file is the durable, shareable outlook.
 
-**Product promise (through 0.4):** **read-only** Postgres from bb — human panel +
-agent tools. `INSERT` / `UPDATE` / `DELETE` / DDL are rejected until **0.5**.
+**Product promise (0.5+):** Postgres from bb — human panel + agent tools.
+**UI connections default to read/write**; DDL and agent write stay opt-in
+(per-connection flags, default off).
 
 ## Shipped (0.1)
 
@@ -90,24 +91,38 @@ Still **read-only** execution. Copy-paste write aids only.
 
 ## 0.5 — Controlled write
 
-First release that can mutate data. Default stays safe; write is opt-in.
+First release that can mutate data from the UI (and optionally from the agent).
 
-- [ ] Per-connection mode: **Read-only** (default) / **Read-write**
-- [ ] UI: run `INSERT` / `UPDATE` (then `DELETE`) when connection is read-write,
-  with an explicit confirm before execute
-- [ ] Agent: write path **off by default** (separate tool or flag + confirm policy)
-- [ ] Keep `BEGIN READ ONLY` for read-only connections and for `sql_query` unless
-  write is explicitly enabled
-- [ ] Clear UI/README labeling so publish pages do not imply full DML before 0.5
+### Locked policy
 
-**Out of 0.5 (for later):** unrestricted DDL from UI, edit-cell grid → UPDATE,
-agent auto-write without user intent.
+| Setting | Default | Notes |
+|---------|---------|--------|
+| Connection **access mode** | **read/write** | Can switch to read-only per connection |
+| **Agent write** | **off** | Per connection; enable explicitly |
+| **Allow DDL** | **off** | Per connection; CREATE/ALTER/DROP/TRUNCATE/… |
+| Admin / unknown | **blocked** | SET/VACUUM/COPY/… always |
+| UI DML | Allowed in R/W | Confirm; DELETE / unsafe UPDATE = type table name |
+| UI DDL | If Allow DDL | Confirm; DROP/TRUNCATE = type table name |
+| Agent DML | Only if agent write on | Refuses UPDATE/DELETE without selective WHERE |
+| Agent DDL | Agent write **and** Allow DDL | Same flags as above |
+| Read path | `BEGIN READ ONLY` | Always for SELECT-like; agent reads too |
+
+- [x] Per-connection mode: **Read-write** (default) / **Read-only**
+- [x] Per-connection **Agent write** flag (default off)
+- [x] Per-connection **Allow DDL** flag (default off)
+- [x] Classifier + server gate (`assessSqlStatement` / `assessQuery` / `runQuery`)
+- [x] UI confirm + type-table for DELETE / UPDATE without selective WHERE / DROP
+- [x] Driver: RO pool option vs RW; matching transaction mode on execute
+- [x] Agent `sql_query`: write/DDL only when flags enabled; docs/README updated
+
+**Out of 0.5 (for later):** edit-cell grid → UPDATE, estimated affected rows,
+manual commit / row-count caps, admin statements (SET/VACUUM).
 
 ## Explicitly not planned (for now)
 
 | Idea | Why parked |
 |------|------------|
-| Unrestricted DDL / edit-cell grid | After 0.5 proves controlled DML |
+| Unrestricted admin (SET/VACUUM) / edit-cell grid | After controlled DML+DDL prove out |
 | Extra DB drivers | Add a registry only when a second driver is real |
 | Monaco / rich IntelliSense | Light syntax highlight is in 0.3; full IDE cost not justified yet |
 | AWS IAM, Excel export | Niche until someone asks |

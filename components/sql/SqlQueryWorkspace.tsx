@@ -155,6 +155,13 @@ export function SqlQueryWorkspace() {
     names: string[];
     values: Record<string, string>;
   } | null>(null);
+  const [writeConfirm, setWriteConfirm] = useState<{
+    sql: string;
+    summary: string;
+    confirmLevel: "confirm" | "type_table";
+    targetTable: string | null;
+    typedTable: string;
+  } | null>(null);
   const [editorRatio, setEditorRatio] = useState(DEFAULT_EDITOR_RATIO);
   const [editorSelection, setEditorSelection] = useState<SqlEditorSelection>({
     selectionStart: 0,
@@ -171,6 +178,9 @@ export function SqlQueryWorkspace() {
   const lastParamValuesRef = useRef<Record<string, string>>({});
   const paramResolveRef = useRef<
     ((values: Record<string, string> | null) => void) | null
+  >(null);
+  const writeConfirmResolveRef = useRef<
+    ((result: { confirmedTable?: string } | null) => void) | null
   >(null);
 
   const activeHighlightRange = useMemo(
@@ -246,9 +256,43 @@ export function SqlQueryWorkspace() {
         for (let index = 0; index < statements.length; index += 1) {
           const trimmed = statements[index]!;
           try {
+            const assessment = await rpc.call("assessQuery", {
+              connectionId,
+              sql: trimmed,
+            });
+            if (!assessment.allowed) {
+              throw new Error(assessment.blockReason ?? "Statement is not allowed");
+            }
+            let confirmed: boolean | undefined;
+            let confirmedTable: string | undefined;
+            if (assessment.requiresConfirm) {
+              const decision = await new Promise<{
+                confirmedTable?: string;
+              } | null>((resolve) => {
+                writeConfirmResolveRef.current = resolve;
+                setWriteConfirm({
+                  sql: trimmed,
+                  summary: assessment.summary,
+                  confirmLevel:
+                    assessment.confirmLevel === "type_table"
+                      ? "type_table"
+                      : "confirm",
+                  targetTable: assessment.targetTable,
+                  typedTable: "",
+                });
+              });
+              if (!decision) {
+                toast.info("Write cancelled");
+                break;
+              }
+              confirmed = true;
+              confirmedTable = decision.confirmedTable;
+            }
             const next = await rpc.call("runQuery", {
               connectionId,
               sql: trimmed,
+              ...(confirmed ? { confirmed: true } : {}),
+              ...(confirmedTable ? { confirmedTable } : {}),
             });
             const tab: ResultTab = {
               id: crypto.randomUUID(),
@@ -285,6 +329,16 @@ export function SqlQueryWorkspace() {
       }
     },
     [connections, patchConnectionStatus, rpc, refreshHistory],
+  );
+
+  const finishWriteConfirm = useCallback(
+    (result: { confirmedTable?: string } | null) => {
+      const resolve = writeConfirmResolveRef.current;
+      writeConfirmResolveRef.current = null;
+      setWriteConfirm(null);
+      resolve?.(result);
+    },
+    [],
   );
 
   const promptForSqlParams = useCallback((names: string[]) => {
@@ -1380,6 +1434,100 @@ export function SqlQueryWorkspace() {
               }}
             >
               Run
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={writeConfirm !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            finishWriteConfirm(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Confirm write</DialogTitle>
+            <DialogDescription>{writeConfirm?.summary}</DialogDescription>
+          </DialogHeader>
+          <pre className="max-h-40 overflow-auto rounded border border-border bg-muted/40 p-2 text-xs whitespace-pre-wrap">
+            {writeConfirm?.sql}
+          </pre>
+          {writeConfirm?.confirmLevel === "type_table" ? (
+            <label className="flex flex-col gap-1 text-xs">
+              <span className="text-muted-foreground">
+                Type table name{" "}
+                <code className="font-mono">{writeConfirm.targetTable ?? "?"}</code>{" "}
+                to confirm
+              </span>
+              <Input
+                autoFocus
+                value={writeConfirm.typedTable}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setWriteConfirm((current) =>
+                    current ? { ...current, typedTable: value } : current,
+                  );
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && writeConfirm) {
+                    event.preventDefault();
+                    const expected = (writeConfirm.targetTable ?? "")
+                      .replaceAll('"', "")
+                      .toLowerCase();
+                    const typed = writeConfirm.typedTable
+                      .replaceAll('"', "")
+                      .trim()
+                      .toLowerCase();
+                    if (typed !== expected) {
+                      toast.error("Table name does not match");
+                      return;
+                    }
+                    finishWriteConfirm({ confirmedTable: writeConfirm.typedTable.trim() });
+                  }
+                }}
+                placeholder={writeConfirm.targetTable ?? "table"}
+              />
+            </label>
+          ) : null}
+          <DialogFooter>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => finishWriteConfirm(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              variant="destructive"
+              onClick={() => {
+                if (!writeConfirm) {
+                  return;
+                }
+                if (writeConfirm.confirmLevel === "type_table") {
+                  const expected = (writeConfirm.targetTable ?? "")
+                    .replaceAll('"', "")
+                    .toLowerCase();
+                  const typed = writeConfirm.typedTable
+                    .replaceAll('"', "")
+                    .trim()
+                    .toLowerCase();
+                  if (typed !== expected) {
+                    toast.error("Table name does not match");
+                    return;
+                  }
+                  finishWriteConfirm({
+                    confirmedTable: writeConfirm.typedTable.trim(),
+                  });
+                  return;
+                }
+                finishWriteConfirm({});
+              }}
+            >
+              Run write
             </Button>
           </DialogFooter>
         </DialogContent>

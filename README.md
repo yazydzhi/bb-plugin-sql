@@ -3,14 +3,13 @@
 SQLTools-style Postgres panel for [bb](https://get-bb.dev): manage connections,
 browse schemas/tables, and run SQL from a panel or agent tools.
 
-> **Read-only until 0.5.** Versions **before `0.5`** only support **read**
-> queries (`SELECT` and other statements that succeed under `BEGIN READ ONLY`).
-> `INSERT` / `UPDATE` / `DELETE` / DDL are rejected on purpose.
-> Controlled write is planned for **0.5** — see [ROADMAP.md](./ROADMAP.md).
+> **0.5 controlled write.** UI connections default to **read/write**. **Allow DDL**
+> and **Agent write** are off by default (separate checkboxes). Confirm before
+> DML/DDL; DROP / DELETE / unsafe UPDATE may require typing the table name.
+> Admin statements (SET/VACUUM/…) stay blocked.
 >
-> **До версии 0.5 — только чтение.** Запись (`INSERT` / `UPDATE` / `DELETE` / DDL)
-> не выполняется. Контролируемая запись — в релизе **0.5**, детали в
-> [ROADMAP.md](./ROADMAP.md).
+> **0.5 — контролируемая запись.** В UI по умолчанию read/write. Allow DDL и
+> Agent write по умолчанию выключены. Admin-команды по-прежнему запрещены.
 
 ## Install
 
@@ -76,7 +75,8 @@ Setup checklist:
 ### Agent tools
 
 - `sql_list_connections` — discover configured connection names/ids.
-- `sql_query` — `{ connection, sql, limit? }` → text table (**read-only** until 0.5).
+- `sql_query` — `{ connection, sql, limit? }` → text table. DML needs **Agent
+  write**; DDL also needs **Allow DDL** (both default off). Admin always blocked.
 
 ## Security notes
 

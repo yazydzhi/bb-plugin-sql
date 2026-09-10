@@ -10,7 +10,7 @@ function quoteIdent(ident: string): string {
 }
 
 /**
- * Черновик INSERT для copy-paste (выполнение остаётся read-only до 0.5).
+ * Черновик INSERT для copy-paste (выполнение — через 0.5 write path + confirm).
  */
 export function buildInsertTemplate(
   schema: string,

@@ -79,8 +79,8 @@ export function ConnectionFormDialog({
             Passwords are stored in a 0600 secrets file next to the plugin database —
             not in SQLite and not sent to the browser after save.
             {editing
-              ? " Use Test to check credentials without saving."
-              : " A live test runs before save."}
+              ? " Use Test to check credentials. Save still works if the server is down (e.g. Access flags)."
+              : " A live test runs before save; you can confirm to save anyway if it fails."}
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 py-2">
@@ -189,6 +189,62 @@ export function ConnectionFormDialog({
               </Field>
             </div>
           ) : null}
+          <div className="grid gap-2 rounded border border-border p-2">
+            <p className="text-xs font-medium">Access</p>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={form.accessMode === "readonly"}
+                onChange={(event) =>
+                  setForm({
+                    ...form,
+                    accessMode: event.target.checked ? "readonly" : "readwrite",
+                  })
+                }
+              />
+              <span>
+                Read-only
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  Default is read/write. Enable to block INSERT/UPDATE/DELETE in the UI.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={form.agentWrite}
+                onChange={(event) =>
+                  setForm({ ...form, agentWrite: event.target.checked })
+                }
+              />
+              <span>
+                Agent write
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  Off by default. Allows agent <code>sql_query</code> to run DML on
+                  this connection (and DDL if Allow DDL is also on).
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={form.allowDdl}
+                onChange={(event) =>
+                  setForm({ ...form, allowDdl: event.target.checked })
+                }
+              />
+              <span>
+                Allow DDL
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  Off by default. Permits CREATE/ALTER/DROP/TRUNCATE/… in the UI.
+                  Agent also needs Agent write.
+                </span>
+              </span>
+            </label>
+          </div>
         </div>
         <DialogFooter className="gap-2 sm:justify-between">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>

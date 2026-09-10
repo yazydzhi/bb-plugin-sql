@@ -24,6 +24,9 @@ export type PostgresConfig = {
   ssl: PostgresSslConfig;
 };
 
+/** Режим сессии пула: влияет на default_transaction_read_only. */
+export type PoolAccessMode = "readonly" | "readwrite";
+
 export type QueryResult = {
   columns: string[];
   rows: Record<string, unknown>[];
@@ -40,7 +43,7 @@ const AGENT_CELL_MAX_CHARS = 40;
 const AGENT_MAX_COLUMNS = 32;
 
 /** Один Pool на connection id; закрывается в bb.onDispose. */
-const pools = new Map<string, pg.Pool>();
+const pools = new Map<string, { pool: pg.Pool; accessMode: PoolAccessMode }>();
 
 /**
  * Собирает pg SSL-опции из флага и опциональных путей к PEM.
@@ -78,7 +81,10 @@ export function buildSslConfig(options: {
   return ssl;
 }
 
-function poolConfig(config: PostgresConfig): pg.PoolConfig {
+function poolConfig(
+  config: PostgresConfig,
+  accessMode: PoolAccessMode = "readwrite",
+): pg.PoolConfig {
   return {
     host: config.host,
     port: config.port,
@@ -89,21 +95,27 @@ function poolConfig(config: PostgresConfig): pg.PoolConfig {
     max: 4,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
-    // Дополнительный барьер: даже вне BEGIN READ ONLY новые транзакции read-only.
-    options: "-c default_transaction_read_only=on",
+    options:
+      accessMode === "readonly"
+        ? "-c default_transaction_read_only=on"
+        : "-c default_transaction_read_only=off",
   };
 }
 
 /**
  * Возвращает (или создаёт) пул для connection id.
  */
-export function getPool(connectionId: string, config: PostgresConfig): pg.Pool {
+export function getPool(
+  connectionId: string,
+  config: PostgresConfig,
+  accessMode: PoolAccessMode = "readwrite",
+): pg.Pool {
   const existing = pools.get(connectionId);
   if (existing) {
-    return existing;
+    return existing.pool;
   }
-  const pool = new Pool(poolConfig(config));
-  pools.set(connectionId, pool);
+  const pool = new Pool(poolConfig(config, accessMode));
+  pools.set(connectionId, { pool, accessMode });
   return pool;
 }
 
@@ -111,7 +123,7 @@ export function getPool(connectionId: string, config: PostgresConfig): pg.Pool {
  * Пул есть только после Connect; иначе null.
  */
 export function getConnectedPool(connectionId: string): pg.Pool | null {
-  return pools.get(connectionId) ?? null;
+  return pools.get(connectionId)?.pool ?? null;
 }
 
 export function isConnected(connectionId: string): boolean {
@@ -124,9 +136,14 @@ export function isConnected(connectionId: string): boolean {
 export async function connectPool(
   connectionId: string,
   config: PostgresConfig,
+  accessMode: PoolAccessMode = "readwrite",
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    const pool = getPool(connectionId, config);
+    const existing = pools.get(connectionId);
+    if (existing && existing.accessMode !== accessMode) {
+      await dropPool(connectionId);
+    }
+    const pool = getPool(connectionId, config, accessMode);
     await pool.query("SELECT 1");
     return { ok: true };
   } catch (error) {
@@ -148,30 +165,31 @@ export async function disconnectPool(connectionId: string): Promise<void> {
 export async function reconnectPool(
   connectionId: string,
   config: PostgresConfig,
+  accessMode: PoolAccessMode = "readwrite",
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   await dropPool(connectionId);
-  return connectPool(connectionId, config);
+  return connectPool(connectionId, config, accessMode);
 }
 
 /**
  * Закрывает и удаляет пул для connection id (после update/delete).
  */
 export async function dropPool(connectionId: string): Promise<void> {
-  const pool = pools.get(connectionId);
-  if (!pool) {
+  const entry = pools.get(connectionId);
+  if (!entry) {
     return;
   }
   pools.delete(connectionId);
-  await pool.end();
+  await entry.pool.end();
 }
 
 /**
  * Закрывает все пулы — вызывается из bb.onDispose.
  */
 export async function closeAllPools(): Promise<void> {
-  const pending = [...pools.entries()].map(async ([id, pool]) => {
+  const pending = [...pools.entries()].map(async ([id, entry]) => {
     pools.delete(id);
-    await pool.end();
+    await entry.pool.end();
   });
   await Promise.all(pending);
 }
@@ -182,7 +200,7 @@ export async function closeAllPools(): Promise<void> {
 export async function testConnection(
   config: PostgresConfig,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const client = new pg.Client(poolConfig(config));
+  const client = new pg.Client(poolConfig(config, "readwrite"));
   try {
     await client.connect();
     await client.query("SELECT 1");
@@ -497,47 +515,67 @@ export async function describeTable(
 }
 
 /**
- * Выполняет SQL в READ ONLY транзакции с statement_timeout и лимитом строк.
- * Предпочитает CURSOR+FETCH, чтобы не материализовать весь результат в память.
- * Одна реализация для UI и agent tool.
+ * Выполняет SQL в транзакции с statement_timeout и лимитом строк.
+ * Read: BEGIN READ ONLY + cursor FETCH. Write: BEGIN + прямой query.
  */
 export async function runQuery(
   pool: pg.Pool,
   sql: string,
-  options?: { limitRows?: number; timeoutMs?: number },
+  options?: {
+    limitRows?: number;
+    timeoutMs?: number;
+    transactionMode?: "readonly" | "readwrite";
+  },
 ): Promise<QueryResult> {
   const limitRows = options?.limitRows ?? DEFAULT_LIMIT_ROWS;
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const transactionMode = options?.transactionMode ?? "readonly";
+  const beginSql =
+    transactionMode === "readwrite" ? "BEGIN" : "BEGIN READ ONLY";
   const client = await pool.connect();
   const started = Date.now();
 
   try {
-    await client.query("BEGIN READ ONLY");
-    await client.query(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(timeoutMs))}`);
+    await client.query(beginSql);
+    await client.query(
+      `SET LOCAL statement_timeout = ${Math.max(1, Math.floor(timeoutMs))}`,
+    );
 
     let columns: string[];
     let rowsRaw: Record<string, unknown>[];
     let truncated: boolean;
 
-    const cursorOk = await tryFetchViaCursor(client, sql, limitRows);
+    const cursorOk =
+      transactionMode === "readonly"
+        ? await tryFetchViaCursor(client, sql, limitRows)
+        : null;
     if (cursorOk) {
       columns = cursorOk.columns;
       rowsRaw = cursorOk.rows;
       truncated = cursorOk.truncated;
     } else {
-      // Ошибка DECLARE абортит транзакцию — открываем заново для fallback.
-      await client.query("ROLLBACK").catch(() => undefined);
-      await client.query("BEGIN READ ONLY");
-      await client.query(
-        `SET LOCAL statement_timeout = ${Math.max(1, Math.floor(timeoutMs))}`,
-      );
+      if (transactionMode === "readonly") {
+        await client.query("ROLLBACK").catch(() => undefined);
+        await client.query(beginSql);
+        await client.query(
+          `SET LOCAL statement_timeout = ${Math.max(1, Math.floor(timeoutMs))}`,
+        );
+      }
       const rawResult = await client.query({ text: sql, values: [] });
       if (Array.isArray(rawResult)) {
         throw new Error("Multiple SQL statements per call are not allowed.");
       }
       columns = (rawResult.fields ?? []).map((field) => field.name);
+      const affected =
+        typeof rawResult.rowCount === "number" ? rawResult.rowCount : rawResult.rows.length;
       truncated = rawResult.rows.length > limitRows;
       rowsRaw = truncated ? rawResult.rows.slice(0, limitRows) : rawResult.rows;
+      // Для DML без RETURNING rows пустые — отдаём rowCount через синтетику ниже.
+      if (columns.length === 0 && transactionMode === "readwrite") {
+        columns = ["rowCount"];
+        rowsRaw = [{ rowCount: affected }];
+        truncated = false;
+      }
     }
 
     await client.query("COMMIT");

@@ -1,7 +1,7 @@
 {
   "name": "bb-plugin-sql",
-  "version": "0.4.2",
-  "description": "SQLTools-style Postgres panel for bb: browse schemas/tables and run SQL. Read-only until 0.5 (INSERT/UPDATE/DELETE planned then) — see ROADMAP.md. Agents: sql_query + sql_list_connections.",
+  "version": "0.5.4",
+  "description": "SQLTools-style Postgres panel for bb: browse schemas/tables and run SQL with controlled write/DDL (0.5). Agents: sql_query + sql_list_connections.",
   "license": "MIT",
   "type": "module",
   "repository": {
@@ -14,7 +14,7 @@
   },
   "bb": {
     "name": "SQL",
-    "description": "Postgres in bb: browse schemas and run SQL. Read-only until 0.5 — see ROADMAP for controlled write.",
+    "description": "Postgres in bb: browse schemas and run SQL. Controlled write/DDL — Agent write and Allow DDL off by default.",
     "branding": {
       "icon": "Layers"
     },

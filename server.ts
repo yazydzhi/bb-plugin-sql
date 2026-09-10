@@ -1,4 +1,4 @@
-// bb-plugin-sql — backend: connection CRUD, browse, read-only SQL, agent tools.
+// bb-plugin-sql — backend: connection CRUD, browse, controlled SQL, agent tools.
 import path from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -27,7 +27,14 @@ import {
   hasConnectionPassword,
   setConnectionPassword,
 } from "./lib/connection-secrets.js";
+import {
+  assessSqlStatement,
+  sqlNeedsWriteTransaction,
+  type AccessMode,
+} from "./lib/sql-safety.js";
 import { parseConnHint } from "./lib/parse-conn-hint.js";
+
+const accessModeSchema = z.enum(["readonly", "readwrite"]);
 
 const connectionPublicSchema = z
   .object({
@@ -41,6 +48,12 @@ const connectionPublicSchema = z
     sslCaPath: z.string().nullable(),
     sslCertPath: z.string().nullable(),
     sslKeyPath: z.string().nullable(),
+    /** UI default: readwrite. */
+    accessMode: accessModeSchema,
+    /** Agent DML/DDL; default off. */
+    agentWrite: z.boolean(),
+    /** CREATE/ALTER/DROP/…; default off. */
+    allowDdl: z.boolean(),
     hasPassword: z.boolean(),
     createdAt: z.string(),
   })
@@ -65,6 +78,9 @@ const connectionInputSchema = z
     user: z.string().min(1),
     password: z.string(),
     ssl: z.boolean().default(false),
+    accessMode: accessModeSchema.default("readwrite"),
+    agentWrite: z.boolean().default(false),
+    allowDdl: z.boolean().default(false),
     ...sslPathsSchema,
   })
   .strict();
@@ -80,7 +96,32 @@ const updateConnectionInputSchema = z
     // Пустой/отсутствующий пароль = оставить прежний в secrets.
     password: z.string().optional(),
     ssl: z.boolean(),
+    accessMode: accessModeSchema,
+    agentWrite: z.boolean(),
+    allowDdl: z.boolean(),
     ...sslPathsSchema,
+  })
+  .strict();
+
+const sqlAssessmentSchema = z
+  .object({
+    kind: z.enum([
+      "read",
+      "insert",
+      "update",
+      "delete",
+      "merge",
+      "ddl",
+      "admin",
+      "unknown",
+    ]),
+    allowed: z.boolean(),
+    blockReason: z.string().nullable(),
+    confirmLevel: z.enum(["none", "confirm", "type_table"]),
+    requiresConfirm: z.boolean(),
+    missingOrTautologyWhere: z.boolean(),
+    targetTable: z.string().nullable(),
+    summary: z.string(),
   })
   .strict();
 
@@ -286,9 +327,23 @@ export const rpcContract = defineRpcContract({
         connectionId: z.string().min(1),
         sql: z.string().min(1),
         limit: z.number().int().positive().max(5000).optional(),
+        /** UI подтвердил опасный DML. */
+        confirmed: z.boolean().optional(),
+        /** Для type_table: имя таблицы как в assessment.targetTable. */
+        confirmedTable: z.string().optional(),
       })
       .strict(),
     output: queryResultSchema,
+  },
+  /** Предпросмотр безопасности statement до Run. */
+  assessQuery: {
+    input: z
+      .object({
+        connectionId: z.string().min(1),
+        sql: z.string().min(1),
+      })
+      .strict(),
+    output: sqlAssessmentSchema,
   },
   /** Shared active connection + pending draft SQL (explorer → query panel). */
   getUiState: {
@@ -454,6 +509,12 @@ type ConnectionRow = {
   ssl_ca_path: string | null;
   ssl_cert_path: string | null;
   ssl_key_path: string | null;
+  /** "readonly" | "readwrite"; default readwrite. */
+  access_mode: string;
+  /** 0/1; default 0. */
+  agent_write: number;
+  /** 0/1; default 0. */
+  allow_ddl: number;
   created_at: string;
 };
 
@@ -468,16 +529,45 @@ type PublicConnection = {
   sslCaPath: string | null;
   sslCertPath: string | null;
   sslKeyPath: string | null;
+  accessMode: AccessMode;
+  agentWrite: boolean;
+  allowDdl: boolean;
   hasPassword: boolean;
   createdAt: string;
 };
 
 const CONNECTION_SELECT = `id, name, host, port, database, "user", password, ssl,
-  ssl_ca_path, ssl_cert_path, ssl_key_path, created_at`;
+  ssl_ca_path, ssl_cert_path, ssl_key_path,
+  COALESCE(access_mode, 'readwrite') AS access_mode,
+  COALESCE(agent_write, 0) AS agent_write,
+  COALESCE(allow_ddl, 0) AS allow_ddl,
+  created_at`;
 
 function normalizePath(value: string | null | undefined): string | null {
   const trimmed = value?.trim() ?? "";
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function rowAccessMode(row: ConnectionRow): AccessMode {
+  return row.access_mode === "readonly" ? "readonly" : "readwrite";
+}
+
+function rowAgentWrite(row: ConnectionRow): boolean {
+  return row.agent_write === 1;
+}
+
+function rowAllowDdl(row: ConnectionRow): boolean {
+  return row.allow_ddl === 1;
+}
+
+/** Сравнивает имена таблиц без кавычек и регистра схемы. */
+function tablesMatch(expected: string | null, typed: string | undefined): boolean {
+  if (!expected || !typed) {
+    return false;
+  }
+  const norm = (value: string) =>
+    value.replaceAll('"', "").replace(/\s+/g, "").toLowerCase();
+  return norm(expected) === norm(typed);
 }
 
 export default async function plugin(bb: BbPluginApi) {
@@ -517,6 +607,10 @@ export default async function plugin(bb: BbPluginApi) {
       connection_id TEXT,
       created_at TEXT NOT NULL
     )`,
+    // 0.5: режим доступа и agent write (default R/W UI, agent off).
+    `ALTER TABLE connections ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'readwrite'`,
+    `ALTER TABLE connections ADD COLUMN agent_write INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE connections ADD COLUMN allow_ddl INTEGER NOT NULL DEFAULT 0`,
   ]);
 
   const pluginDataDir = path.dirname(String((db as { name?: string }).name ?? ""));
@@ -554,6 +648,9 @@ export default async function plugin(bb: BbPluginApi) {
       sslCaPath: row.ssl_ca_path,
       sslCertPath: row.ssl_cert_path,
       sslKeyPath: row.ssl_key_path,
+      accessMode: rowAccessMode(row),
+      agentWrite: rowAgentWrite(row),
+      allowDdl: rowAllowDdl(row),
       hasPassword: hasConnectionPassword(pluginDataDir, row.id),
       createdAt: row.created_at,
     };
@@ -758,7 +855,11 @@ export default async function plugin(bb: BbPluginApi) {
         `Connection "${row.name}" has no stored password. Connect from the SQL panel first.`,
       );
     }
-    const result = await connectPool(row.id, toConfig(row, resolved.password));
+    const result = await connectPool(
+      row.id,
+      toConfig(row, resolved.password),
+      rowAccessMode(row),
+    );
     if (!result.ok) {
       throw new Error(result.error);
     }
@@ -784,11 +885,14 @@ export default async function plugin(bb: BbPluginApi) {
       const sslCaPath = normalizePath(input.sslCaPath);
       const sslCertPath = normalizePath(input.sslCertPath);
       const sslKeyPath = normalizePath(input.sslKeyPath);
+      const accessMode = input.accessMode ?? "readwrite";
+      const agentWrite = input.agentWrite ?? false;
+      const allowDdl = input.allowDdl ?? false;
       db.prepare(
         `INSERT INTO connections
          (id, name, host, port, database, "user", password, ssl,
-          ssl_ca_path, ssl_cert_path, ssl_key_path, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)`,
+          ssl_ca_path, ssl_cert_path, ssl_key_path, access_mode, agent_write, allow_ddl, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id,
         input.name,
@@ -800,6 +904,9 @@ export default async function plugin(bb: BbPluginApi) {
         sslCaPath,
         sslCertPath,
         sslKeyPath,
+        accessMode,
+        agentWrite ? 1 : 0,
+        allowDdl ? 1 : 0,
         createdAt,
       );
       setConnectionPassword(pluginDataDir, id, input.password);
@@ -819,7 +926,8 @@ export default async function plugin(bb: BbPluginApi) {
       db.prepare(
         `UPDATE connections
          SET name = ?, host = ?, port = ?, database = ?, "user" = ?, password = '',
-             ssl = ?, ssl_ca_path = ?, ssl_cert_path = ?, ssl_key_path = ?
+             ssl = ?, ssl_ca_path = ?, ssl_cert_path = ?, ssl_key_path = ?,
+             access_mode = ?, agent_write = ?, allow_ddl = ?
          WHERE id = ?`,
       ).run(
         input.name,
@@ -831,6 +939,9 @@ export default async function plugin(bb: BbPluginApi) {
         sslCaPath,
         sslCertPath,
         sslKeyPath,
+        input.accessMode,
+        input.agentWrite ? 1 : 0,
+        input.allowDdl ? 1 : 0,
         input.id,
       );
       if (input.password !== undefined) {
@@ -878,7 +989,11 @@ export default async function plugin(bb: BbPluginApi) {
       if ("needsPassword" in resolved) {
         return { ok: false, needsPassword: true, error: "Password required" };
       }
-      const result = await connectPool(id, toConfig(row, resolved.password));
+      const result = await connectPool(
+        id,
+        toConfig(row, resolved.password),
+        rowAccessMode(row),
+      );
       publishUi();
       if (result.ok) {
         return { ok: true };
@@ -899,7 +1014,11 @@ export default async function plugin(bb: BbPluginApi) {
       if ("needsPassword" in resolved) {
         return { ok: false, needsPassword: true, error: "Password required" };
       }
-      const result = await reconnectPool(id, toConfig(row, resolved.password));
+      const result = await reconnectPool(
+        id,
+        toConfig(row, resolved.password),
+        rowAccessMode(row),
+      );
       publishUi();
       if (result.ok) {
         return { ok: true };
@@ -962,9 +1081,51 @@ export default async function plugin(bb: BbPluginApi) {
       return driverDescribeTable(poolFor(row), schema, table);
     },
 
-    runQuery: async ({ connectionId, sql, limit }) => {
+    assessQuery: ({ connectionId, sql }) => {
       const row = requireRow(connectionId);
-      return driverRunQuery(poolFor(row), sql, { limitRows: limit });
+      return assessSqlStatement(sql, {
+        accessMode: rowAccessMode(row),
+        fromAgent: false,
+        agentWriteEnabled: rowAgentWrite(row),
+        allowDdl: rowAllowDdl(row),
+      });
+    },
+
+    runQuery: async ({ connectionId, sql, limit, confirmed, confirmedTable }) => {
+      const row = requireRow(connectionId);
+      const accessMode = rowAccessMode(row);
+      const assessment = assessSqlStatement(sql, {
+        accessMode,
+        fromAgent: false,
+        agentWriteEnabled: rowAgentWrite(row),
+        allowDdl: rowAllowDdl(row),
+      });
+      if (!assessment.allowed) {
+        throw new Error(assessment.blockReason ?? "Statement is not allowed");
+      }
+      if (assessment.requiresConfirm) {
+        if (!confirmed) {
+          throw new Error(
+            assessment.summary + " — confirm in the UI before running.",
+          );
+        }
+        if (
+          assessment.confirmLevel === "type_table" &&
+          !tablesMatch(assessment.targetTable, confirmedTable)
+        ) {
+          throw new Error(
+            `Type the table name (${assessment.targetTable ?? "?"}) to confirm.`,
+          );
+        }
+      }
+      const transactionMode =
+        accessMode === "readonly" || !sqlNeedsWriteTransaction(sql, assessment.kind)
+          ? "readonly"
+          : "readwrite";
+      return driverRunQuery(poolFor(row), sql, {
+        limitRows: limit,
+        transactionMode,
+      });
     },
 
     getUiState: () => ({
@@ -1206,10 +1367,12 @@ export default async function plugin(bb: BbPluginApi) {
         return "No Postgres connections configured. Add one in the SQL panel.";
       }
       return connections
-        .map(
-          (row) =>
-            `- ${row.name} (id=${row.id}, ${row.user}@${row.host}:${row.port}/${row.database})`,
-        )
+        .map((row) => {
+          const mode = rowAccessMode(row);
+          const agent = rowAgentWrite(row) ? "agent-write=on" : "agent-write=off";
+          const ddl = rowAllowDdl(row) ? "allow-ddl=on" : "allow-ddl=off";
+          return `- ${row.name} (id=${row.id}, ${row.user}@${row.host}:${row.port}/${row.database}, mode=${mode}, ${agent}, ${ddl})`;
+        })
         .join("\n");
     },
   });
@@ -1217,11 +1380,14 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "sql_query",
     description:
-      "Run a read-only SQL query against a configured Postgres connection (one statement per call).",
+      "Run a SQL query against a configured Postgres connection (one statement per call). " +
+      "DML needs Agent write; DDL also needs Allow DDL. Admin/session statements are never allowed.",
     instructions:
-      "Use sql_query for read-only lookups against configured Postgres connections. " +
-      "Each call runs one statement inside BEGIN READ ONLY with a row limit. " +
-      "Configure the Postgres role with SELECT-only privileges; statements that succeed under read-only mode are allowed.",
+      "Use sql_query against configured Postgres connections. One statement per call. " +
+      "Reads always run in BEGIN READ ONLY. DML requires Agent write (default off). " +
+      "DDL (CREATE/ALTER/DROP/TRUNCATE/…) requires both Agent write and Allow DDL (both default off). " +
+      "UPDATE/DELETE without a selective WHERE are refused. SET/VACUUM/COPY/… are blocked. " +
+      "Ask the user to enable the connection flags if they need tool-driven mutations or schema changes.",
     presentation: {
       label: {
         pending: "Running SQL query",
@@ -1234,7 +1400,7 @@ export default async function plugin(bb: BbPluginApi) {
           .string()
           .min(1)
           .describe("Connection name or id from sql_list_connections"),
-        sql: z.string().min(1).describe("Read-only SQL to execute"),
+        sql: z.string().min(1).describe("SQL to execute (one statement)"),
         limit: z.number().int().positive().max(5000).optional(),
       })
       .strict(),
@@ -1252,8 +1418,32 @@ export default async function plugin(bb: BbPluginApi) {
             isError: true,
           };
         }
+        const accessMode = rowAccessMode(row);
+        const assessment = assessSqlStatement(sql, {
+          accessMode,
+          fromAgent: true,
+          agentWriteEnabled: rowAgentWrite(row),
+          allowDdl: rowAllowDdl(row),
+        });
+        if (!assessment.allowed) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: assessment.blockReason ?? "Statement is not allowed",
+              },
+            ],
+            isError: true,
+          };
+        }
+        const transactionMode =
+          accessMode === "readonly" ||
+          !sqlNeedsWriteTransaction(sql, assessment.kind)
+            ? "readonly"
+            : "readwrite";
         const result = await driverRunQuery(await ensurePool(row), sql, {
           limitRows: limit,
+          transactionMode,
         });
         return formatQueryAsText(result);
       } catch (error) {

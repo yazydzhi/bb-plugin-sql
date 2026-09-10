@@ -1,4 +1,6 @@
 /** Общие типы UI SQL-плагина. */
+export type AccessMode = "readonly" | "readwrite";
+
 export type PublicConnection = {
   id: string;
   name: string;
@@ -10,6 +12,9 @@ export type PublicConnection = {
   sslCaPath: string | null;
   sslCertPath: string | null;
   sslKeyPath: string | null;
+  accessMode: AccessMode;
+  agentWrite: boolean;
+  allowDdl: boolean;
   hasPassword: boolean;
   createdAt: string;
 };
@@ -100,6 +105,12 @@ export type ConnectionForm = {
   sslCaPath: string;
   sslCertPath: string;
   sslKeyPath: string;
+  /** Default readwrite. */
+  accessMode: AccessMode;
+  /** Default off. */
+  agentWrite: boolean;
+  /** Default off — CREATE/ALTER/DROP/…. */
+  allowDdl: boolean;
   /** Временное поле: paste URI (не сохраняется). */
   uriPaste: string;
 };
@@ -141,6 +152,9 @@ export function emptyForm(): ConnectionForm {
     sslCaPath: "",
     sslCertPath: "",
     sslKeyPath: "",
+    accessMode: "readwrite",
+    agentWrite: false,
+    allowDdl: false,
     uriPaste: "",
   };
 }

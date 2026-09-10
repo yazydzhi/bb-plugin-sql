@@ -539,6 +539,9 @@ export function SqlExplorer() {
       sslCaPath: connection.sslCaPath ?? "",
       sslCertPath: connection.sslCertPath ?? "",
       sslKeyPath: connection.sslKeyPath ?? "",
+      accessMode: connection.accessMode ?? "readwrite",
+      agentWrite: connection.agentWrite ?? false,
+      allowDdl: connection.allowDdl ?? false,
       uriPaste: "",
     });
     setDialogOpen(true);
@@ -639,9 +642,19 @@ export function SqlExplorer() {
     try {
       const sslPaths = formSslPaths();
       const probe = await rpc.call("probeConnection", buildProbeInput(port));
+      let savedWithoutLiveTest = false;
       if (!probe.ok) {
-        toast.error(probe.error ?? "Connection test failed — not saved");
-        return;
+        const detail = probe.error ?? "Connection test failed";
+        // Флаги Access (Agent write / Allow DDL) должны сохраняться даже если
+        // Postgres сейчас недоступен (как local на :5432 без сервера).
+        const proceed = window.confirm(
+          `${detail}\n\nSave connection settings anyway?`,
+        );
+        if (!proceed) {
+          toast.error(`${detail} — not saved`);
+          return;
+        }
+        savedWithoutLiveTest = true;
       }
 
       if (editing) {
@@ -657,6 +670,9 @@ export function SqlExplorer() {
           sslCaPath: string | null;
           sslCertPath: string | null;
           sslKeyPath: string | null;
+          accessMode: "readonly" | "readwrite";
+          agentWrite: boolean;
+          allowDdl: boolean;
         } = {
           id: editing.id,
           name: form.name.trim(),
@@ -665,13 +681,20 @@ export function SqlExplorer() {
           database: form.database.trim(),
           user: form.user.trim(),
           ssl: form.ssl,
+          accessMode: form.accessMode,
+          agentWrite: form.agentWrite,
+          allowDdl: form.allowDdl,
           ...sslPaths,
         };
         if (form.password.length > 0) {
           updateInput.password = form.password;
         }
         await rpc.call("updateConnection", updateInput);
-        toast.success("Connection tested and updated");
+        toast.success(
+          savedWithoutLiveTest
+            ? "Connection updated (live test failed)"
+            : "Connection tested and updated",
+        );
         await selectConnection(editing.id);
       } else {
         const { connection } = await rpc.call("createConnection", {
@@ -682,10 +705,17 @@ export function SqlExplorer() {
           user: form.user.trim(),
           password: form.password,
           ssl: form.ssl,
+          accessMode: form.accessMode,
+          agentWrite: form.agentWrite,
+          allowDdl: form.allowDdl,
           ...sslPaths,
         });
         await selectConnection(connection.id);
-        toast.success("Connection tested and saved");
+        toast.success(
+          savedWithoutLiveTest
+            ? "Connection saved (live test failed)"
+            : "Connection tested and saved",
+        );
       }
       setDialogOpen(false);
       await refreshConnections();
