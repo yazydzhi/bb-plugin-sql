@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import type { rpcContract } from "../../server";
@@ -11,6 +19,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { parseConnHint } from "@/lib/parse-conn-hint";
+import { useOfflineStatusFade } from "@/hooks/use-offline-status-fade";
+import { SqlCodeEditor } from "./SqlCodeEditor";
 import {
   copyText,
   downloadResultCsv,
@@ -26,16 +36,19 @@ import type {
   ConnectionListItem,
   ConnectionStatusEntry,
   HistoryItem,
-  PublicConnection,
   ResultTab,
 } from "./types";
 import {
-  mergeConnectionStatuses,
-  connectionStatusFromMap,
   connectionErrorFromMap,
+  connectionStatusFromMap,
   makeStatusEntry,
+  mergeConnectionStatuses,
 } from "./types";
-import { useOfflineStatusFade } from "@/hooks/use-offline-status-fade";
+
+/** Доля высоты панели под редактор (остальное — результаты). */
+const DEFAULT_EDITOR_RATIO = 0.45;
+const MIN_EDITOR_RATIO = 0.18;
+const MAX_EDITOR_RATIO = 0.82;
 
 /**
  * Правая панель / Actions: editor + results + history.
@@ -54,8 +67,11 @@ export function SqlQueryWorkspace() {
   >({});
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [editorRatio, setEditorRatio] = useState(DEFAULT_EDITOR_RATIO);
   const autoRunRef = useRef(false);
   const openSqlInputRef = useRef<HTMLInputElement | null>(null);
+  const splitContainerRef = useRef<HTMLDivElement | null>(null);
+  const dragRatioRef = useRef(DEFAULT_EDITOR_RATIO);
 
   const selectedStatus = selectedId
     ? connectionStatusFromMap(statusById, selectedId)
@@ -344,6 +360,46 @@ export function SqlQueryWorkspace() {
     }
   }
 
+  function clampEditorRatio(ratio: number): number {
+    return Math.min(MAX_EDITOR_RATIO, Math.max(MIN_EDITOR_RATIO, ratio));
+  }
+
+  function startSplitResize(event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const container = splitContainerRef.current;
+    if (!container) {
+      return;
+    }
+    const startY = event.clientY;
+    const startRatio = editorRatio;
+    const containerHeight = container.getBoundingClientRect().height;
+    if (containerHeight <= 0) {
+      return;
+    }
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
+    dragRatioRef.current = startRatio;
+
+    function onMove(moveEvent: PointerEvent) {
+      const delta = moveEvent.clientY - startY;
+      const next = clampEditorRatio(startRatio + delta / containerHeight);
+      dragRatioRef.current = next;
+      setEditorRatio(next);
+    }
+
+    function onUp(upEvent: PointerEvent) {
+      target.releasePointerCapture(upEvent.pointerId);
+      target.removeEventListener("pointermove", onMove);
+      target.removeEventListener("pointerup", onUp);
+      target.removeEventListener("pointercancel", onUp);
+      setEditorRatio(dragRatioRef.current);
+    }
+
+    target.addEventListener("pointermove", onMove);
+    target.addEventListener("pointerup", onUp);
+    target.addEventListener("pointercancel", onUp);
+  }
+
   function loadHistoryItem(item: HistoryItem) {
     setSql(item.sql);
     if (connections.some((connection) => connection.id === item.connectionId)) {
@@ -519,158 +575,173 @@ export function SqlQueryWorkspace() {
         </div>
       ) : null}
 
-      <textarea
-        className="min-h-40 w-full resize-y border-b border-border bg-transparent px-3 py-2 font-mono text-sm outline-none focus-visible:bg-state-hover/30"
-        value={sql}
-        onChange={(event) => setSql(event.target.value)}
-        onKeyDown={onEditorKeyDown}
-        spellCheck={false}
-        placeholder="SELECT …  (⌘/Ctrl+Enter to run)"
-      />
+      <div ref={splitContainerRef} className="flex min-h-0 flex-1 flex-col">
+        <SqlCodeEditor
+          className="min-h-[9rem] border-b border-border"
+          style={{ flex: `0 0 ${editorRatio * 100}%` }}
+          value={sql}
+          onChange={setSql}
+          onKeyDown={onEditorKeyDown}
+        />
 
-      <div className="flex min-h-0 flex-1 flex-col">
-        {resultTabs.length === 0 ? (
-          <p className="px-3 py-3 text-muted-foreground">
-            Results appear here as tabs. Each Run opens a new tab. Use the SQL
-            sidebar for connections and schema browse.
-          </p>
-        ) : (
-          <>
-            <div className="flex items-stretch gap-0 overflow-x-auto border-b border-border">
-              {resultTabs.map((tab) => {
-                const isActive = tab.id === activeResultId;
-                return (
-                  <div
-                    key={tab.id}
-                    className={
-                      isActive
-                        ? "group flex max-w-[14rem] shrink-0 items-center gap-1 border-r border-border bg-state-active px-2 py-1.5"
-                        : "group flex max-w-[14rem] shrink-0 items-center gap-1 border-r border-border px-2 py-1.5 hover:bg-state-hover"
-                    }
-                  >
-                    <button
-                      type="button"
-                      className="min-w-0 flex-1 truncate text-left text-xs"
-                      title={`${tab.connectionName}\n${tab.sql}`}
-                      onClick={() => setActiveResultId(tab.id)}
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-valuemin={Math.round(MIN_EDITOR_RATIO * 100)}
+          aria-valuemax={Math.round(MAX_EDITOR_RATIO * 100)}
+          aria-valuenow={Math.round(editorRatio * 100)}
+          aria-label="Resize editor and results"
+          className="group relative z-10 h-3 w-full shrink-0 cursor-row-resize touch-none bg-transparent"
+          onPointerDown={startSplitResize}
+        >
+          <span className="pointer-events-none absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-border transition-colors group-hover:bg-foreground/40 group-active:bg-foreground/60" />
+        </div>
+
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {resultTabs.length === 0 ? (
+            <p className="px-3 py-3 text-muted-foreground">
+              Results appear here as tabs. Each Run opens a new tab. Use the SQL
+              sidebar for connections and schema browse. Drag the separator to
+              resize the editor.
+            </p>
+          ) : (
+            <>
+              <div className="flex items-stretch gap-0 overflow-x-auto border-b border-border">
+                {resultTabs.map((tab) => {
+                  const isActive = tab.id === activeResultId;
+                  return (
+                    <div
+                      key={tab.id}
+                      className={
+                        isActive
+                          ? "group flex max-w-[14rem] shrink-0 items-center gap-1 border-r border-border bg-state-active px-2 py-1.5"
+                          : "group flex max-w-[14rem] shrink-0 items-center gap-1 border-r border-border px-2 py-1.5 hover:bg-state-hover"
+                      }
                     >
-                      {tab.title}
-                    </button>
-                    <button
-                      type="button"
-                      className="shrink-0 rounded px-1 text-xs text-muted-foreground opacity-60 hover:bg-state-hover hover:opacity-100 group-hover:opacity-100"
-                      aria-label={`Close ${tab.title}`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        closeResultTab(tab.id);
-                      }}
-                    >
-                      ×
-                    </button>
+                      <button
+                        type="button"
+                        className="min-w-0 flex-1 truncate text-left text-xs"
+                        title={`${tab.connectionName}\n${tab.sql}`}
+                        onClick={() => setActiveResultId(tab.id)}
+                      >
+                        {tab.title}
+                      </button>
+                      <button
+                        type="button"
+                        className="shrink-0 rounded px-1 text-xs text-muted-foreground opacity-60 hover:bg-state-hover hover:opacity-100 group-hover:opacity-100"
+                        aria-label={`Close ${tab.title}`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          closeResultTab(tab.id);
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  );
+                })}
+                <button
+                  type="button"
+                  className="shrink-0 px-2 text-xs text-muted-foreground hover:bg-state-hover"
+                  onClick={closeAllResultTabs}
+                >
+                  Close all
+                </button>
+              </div>
+
+              {activeResult ? (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-1.5 text-xs">
+                    <span className="min-w-0 truncate text-muted-foreground">
+                      {activeResult.result.rowCount} row(s) ·{" "}
+                      {activeResult.result.durationMs}ms
+                      {activeResult.result.truncated ? " · truncated" : ""}
+                      {" · "}
+                      {activeResult.connectionName}
+                    </span>
+                    {activeResult.result.columns.length > 0 ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button size="sm" variant="ghost" aria-label="Export results">
+                            ⋮
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem
+                            onSelect={() =>
+                              void copyText(resultToCsv(activeResult.result), "CSV")
+                            }
+                          >
+                            Copy CSV
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={() =>
+                              void copyText(resultToJson(activeResult.result), "JSON")
+                            }
+                          >
+                            Copy JSON
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            onSelect={() => downloadResultCsv(activeResult.result)}
+                          >
+                            Download CSV
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={() => downloadResultJson(activeResult.result)}
+                          >
+                            Download JSON
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem onSelect={() => setSql(activeResult.sql)}>
+                            Load SQL into editor
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    ) : null}
                   </div>
-                );
-              })}
-              <button
-                type="button"
-                className="shrink-0 px-2 text-xs text-muted-foreground hover:bg-state-hover"
-                onClick={closeAllResultTabs}
-              >
-                Close all
-              </button>
-            </div>
-
-            {activeResult ? (
-              <>
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-1.5 text-xs">
-                  <span className="min-w-0 truncate text-muted-foreground">
-                    {activeResult.result.rowCount} row(s) ·{" "}
-                    {activeResult.result.durationMs}ms
-                    {activeResult.result.truncated ? " · truncated" : ""}
-                    {" · "}
-                    {activeResult.connectionName}
-                  </span>
-                  {activeResult.result.columns.length > 0 ? (
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button size="sm" variant="ghost" aria-label="Export results">
-                          ⋮
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem
-                          onSelect={() =>
-                            void copyText(resultToCsv(activeResult.result), "CSV")
-                          }
-                        >
-                          Copy CSV
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onSelect={() =>
-                            void copyText(resultToJson(activeResult.result), "JSON")
-                          }
-                        >
-                          Copy JSON
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          onSelect={() => downloadResultCsv(activeResult.result)}
-                        >
-                          Download CSV
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onSelect={() => downloadResultJson(activeResult.result)}
-                        >
-                          Download JSON
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem onSelect={() => setSql(activeResult.sql)}>
-                          Load SQL into editor
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  ) : null}
-                </div>
-                <div className="min-h-0 flex-1 overflow-auto">
-                  {activeResult.result.columns.length === 0 ? (
-                    <p className="px-3 py-3 text-muted-foreground">
-                      No columns returned.
-                    </p>
-                  ) : (
-                    <table className="w-full border-collapse text-left font-mono text-xs">
-                      <thead className="sticky top-0 bg-background">
-                        <tr>
-                          {activeResult.result.columns.map((column) => (
-                            <th
-                              key={column}
-                              className="border-b border-border px-3 py-1.5 font-medium"
-                            >
-                              {column}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {activeResult.result.rows.map((row, rowIndex) => (
-                          <tr key={rowIndex} className="odd:bg-muted/20">
+                  <div className="min-h-0 flex-1 overflow-auto">
+                    {activeResult.result.columns.length === 0 ? (
+                      <p className="px-3 py-3 text-muted-foreground">
+                        No columns returned.
+                      </p>
+                    ) : (
+                      <table className="w-full border-collapse text-left font-mono text-xs">
+                        <thead className="sticky top-0 bg-background">
+                          <tr>
                             {activeResult.result.columns.map((column) => (
-                              <td
-                                key={`${rowIndex}-${column}`}
-                                className="max-w-xs truncate border-b border-border/60 px-3 py-1 align-top"
-                                title={formatCell(row[column])}
+                              <th
+                                key={column}
+                                className="border-b border-border px-3 py-1.5 font-medium"
                               >
-                                {formatCell(row[column])}
-                              </td>
+                                {column}
+                              </th>
                             ))}
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              </>
-            ) : null}
-          </>
-        )}
+                        </thead>
+                        <tbody>
+                          {activeResult.result.rows.map((row, rowIndex) => (
+                            <tr key={rowIndex} className="odd:bg-muted/20">
+                              {activeResult.result.columns.map((column) => (
+                                <td
+                                  key={`${rowIndex}-${column}`}
+                                  className="max-w-xs truncate border-b border-border/60 px-3 py-1 align-top"
+                                  title={formatCell(row[column])}
+                                >
+                                  {formatCell(row[column])}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </>
+              ) : null}
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -3,6 +3,7 @@ import { useRpc, type PluginFileOpenerProps } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import type { rpcContract } from "../../server";
 import { Button } from "@/components/ui/button";
+import { SqlCodeEditor } from "./SqlCodeEditor";
 import { SqlQueryWorkspace } from "./SqlQueryWorkspace";
 import type { ConnectionListItem } from "./types";
 
@@ -169,16 +170,17 @@ export function SqlFileOpener({ path, source }: PluginFileOpenerProps) {
         <div className="min-h-0 flex-1">
           <SqlQueryWorkspace />
         </div>
-        <details className="border-t border-border">
+        <details className="border-t border-border" open>
           <summary className="cursor-pointer px-3 py-1.5 text-xs text-muted-foreground">
             Raw file
           </summary>
-          <textarea
-            className="max-h-40 w-full resize-y bg-transparent px-3 py-2 font-mono text-xs outline-none"
+          <SqlCodeEditor
+            className="h-56 border-t border-border"
             value={localSql}
-            onChange={(event) => setLocalSql(event.target.value)}
+            onChange={setLocalSql}
             onKeyDown={onKeyDown}
-            spellCheck={false}
+            aria-label={`SQL file ${label}`}
+            placeholder="SQL file contents"
           />
         </details>
       </div>
