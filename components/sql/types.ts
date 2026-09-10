@@ -121,6 +121,14 @@ export type HistoryItem = {
   createdAt: string;
 };
 
+export type BookmarkItem = {
+  id: string;
+  title: string;
+  sql: string;
+  connectionId: string | null;
+  createdAt: string;
+};
+
 export function emptyForm(): ConnectionForm {
   return {
     name: "",

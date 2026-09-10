@@ -21,6 +21,7 @@ import { useOfflineStatusFade } from "@/hooks/use-offline-status-fade";
 import { ConnectionFormDialog } from "./ConnectionFormDialog";
 import { connectOrReconnectWithPasswordPrompt } from "./connect-helpers";
 import { StatusDot } from "./Status";
+import { buildInsertTemplate } from "@/lib/insert-template";
 import {
   emptyForm,
   quoteIdent,
@@ -468,6 +469,40 @@ export function SqlExplorer() {
       `SELECT * FROM ${quoteIdent(schema)}.${quoteIdent(table)} LIMIT 100`,
       true,
     );
+  }
+
+  async function insertInsertTemplate(schema: string, table: string) {
+    const detail = await loadTableDetail(schema, table);
+    if (!detail) {
+      return;
+    }
+    void pushDraft(
+      buildInsertTemplate(schema, table, detail.columns),
+      false,
+    );
+  }
+
+  function isViewRelation(type: string): boolean {
+    const normalized = type.toUpperCase();
+    return normalized === "VIEW" || normalized === "MATERIALIZED VIEW";
+  }
+
+  function partitionRelations(
+    tables: { name: string; type: string }[],
+  ): {
+    baseTables: { name: string; type: string }[];
+    views: { name: string; type: string }[];
+  } {
+    const baseTables: { name: string; type: string }[] = [];
+    const views: { name: string; type: string }[] = [];
+    for (const table of tables) {
+      if (isViewRelation(table.type)) {
+        views.push(table);
+      } else {
+        baseTables.push(table);
+      }
+    }
+    return { baseTables, views };
   }
 
   async function describeTable(schema: string, table: string) {
@@ -987,167 +1022,211 @@ export function SqlExplorer() {
                       ) : tables.length === 0 ? (
                         <li className="py-0.5 text-muted-foreground">Empty</li>
                       ) : (
-                        tables.map((table) => {
-                          const key = tableKey(schema, table.name);
-                          const detailKeyForRow = selectedId
-                            ? detailKey(selectedId, schema, table.name)
-                            : key;
-                          const tableOpen = selectedExpandedTables.has(key);
-                          const detail = tableDetailsById[detailKeyForRow];
-                          const loadingDetail = loadingTables.has(detailKeyForRow);
-                          const extras = detail
-                            ? extraConstraints(detail.constraints)
-                            : [];
-                          return (
-                            <li key={key}>
-                              <div className="group flex items-center gap-0.5">
-                                <button
-                                  type="button"
-                                  className="flex min-w-0 flex-1 items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-state-hover"
-                                  title={`${table.type}: ${schema}.${table.name}`}
-                                  onClick={() =>
-                                    void toggleTable(schema, table.name)
-                                  }
-                                >
-                                  <span className="w-3 shrink-0 text-muted-foreground">
-                                    {tableOpen ? "▾" : "▸"}
-                                  </span>
-                                  <span className="truncate">{table.name}</span>
-                                </button>
-                                <DropdownMenu>
-                                  <DropdownMenuTrigger asChild>
-                                    <Button
-                                      size="sm"
-                                      variant="ghost"
-                                      className="h-6 w-6 shrink-0 px-0 opacity-0 group-hover:opacity-100"
-                                      aria-label={`Actions for ${table.name}`}
-                                    >
-                                      ⋮
-                                    </Button>
-                                  </DropdownMenuTrigger>
-                                  <DropdownMenuContent align="end">
-                                    <DropdownMenuItem
-                                      onSelect={() =>
-                                        insertSelect(schema, table.name)
-                                      }
-                                    >
-                                      Insert SELECT
-                                    </DropdownMenuItem>
-                                    <DropdownMenuItem
-                                      onSelect={() =>
-                                        showRecords(schema, table.name)
-                                      }
-                                    >
-                                      Show records
-                                    </DropdownMenuItem>
-                                    <DropdownMenuItem
-                                      onSelect={() =>
-                                        void describeTable(schema, table.name)
-                                      }
-                                    >
-                                      Describe
-                                    </DropdownMenuItem>
-                                  </DropdownMenuContent>
-                                </DropdownMenu>
-                              </div>
-                              {tableOpen ? (
-                                <ul className="ml-4 border-l border-border pl-2 py-0.5">
-                                  {loadingDetail && !detail ? (
-                                    <li className="px-1 py-0.5 text-muted-foreground">
-                                      Loading…
-                                    </li>
-                                  ) : !detail || detail.columns.length === 0 ? (
-                                    <li className="px-1 py-0.5 text-muted-foreground">
-                                      No columns
-                                    </li>
-                                  ) : (
-                                    <>
-                                      {detail.columns.map((column) => {
-                                        const fk = column.foreignKey;
-                                        const marks: string[] = [];
-                                        if (column.isPrimaryKey) {
-                                          marks.push("PK");
+                        (() => {
+                          const { baseTables, views } = partitionRelations(tables);
+                          const renderRelation = (
+                            table: { name: string; type: string },
+                          ) => {
+                            const key = tableKey(schema, table.name);
+                            const detailKeyForRow = selectedId
+                              ? detailKey(selectedId, schema, table.name)
+                              : key;
+                            const tableOpen = selectedExpandedTables.has(key);
+                            const detail = tableDetailsById[detailKeyForRow];
+                            const loadingDetail = loadingTables.has(detailKeyForRow);
+                            const extras = detail
+                              ? extraConstraints(detail.constraints)
+                              : [];
+                            const view = isViewRelation(table.type);
+                            return (
+                              <li key={key}>
+                                <div className="group flex items-center gap-0.5">
+                                  <button
+                                    type="button"
+                                    className="flex min-w-0 flex-1 items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-state-hover"
+                                    title={`${table.type}: ${schema}.${table.name}`}
+                                    onClick={() =>
+                                      void toggleTable(schema, table.name)
+                                    }
+                                  >
+                                    <span className="w-3 shrink-0 text-muted-foreground">
+                                      {tableOpen ? "▾" : "▸"}
+                                    </span>
+                                    <span className="truncate">{table.name}</span>
+                                    {view ? (
+                                      <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                                        view
+                                      </span>
+                                    ) : null}
+                                  </button>
+                                  <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                      <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        className="h-6 w-6 shrink-0 px-0 opacity-0 group-hover:opacity-100"
+                                        aria-label={`Actions for ${table.name}`}
+                                      >
+                                        ⋮
+                                      </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end">
+                                      <DropdownMenuItem
+                                        onSelect={() =>
+                                          insertSelect(schema, table.name)
                                         }
-                                        if (column.isUnique) {
-                                          marks.push("UQ");
+                                      >
+                                        Insert SELECT
+                                      </DropdownMenuItem>
+                                      <DropdownMenuItem
+                                        onSelect={() =>
+                                          showRecords(schema, table.name)
                                         }
-                                        if (!column.isNullable) {
-                                          marks.push("NN");
-                                        }
-                                        const fkLabel = fk
-                                          ? `${fk.schema === schema ? "" : `${fk.schema}.`}${fk.table}.${fk.column}`
-                                          : null;
-                                        return (
-                                          <li
-                                            key={column.name}
-                                            className="flex items-baseline gap-1.5 px-1 py-0.5 font-mono text-[11px] leading-snug"
-                                            title={[
-                                              column.dataType,
-                                              column.isNullable
-                                                ? "nullable"
-                                                : "not null",
-                                              column.defaultValue
-                                                ? `default ${column.defaultValue}`
-                                                : null,
-                                              fk
-                                                ? `FK ${fk.constraintName} → ${fkLabel}`
-                                                : null,
-                                            ]
-                                              .filter(Boolean)
-                                              .join(" · ")}
-                                          >
-                                            <span className="min-w-0 truncate text-foreground">
-                                              {column.name}
-                                            </span>
-                                            <span className="shrink-0 truncate text-muted-foreground">
-                                              {column.dataType}
-                                            </span>
-                                            {marks.length > 0 ? (
-                                              <span className="shrink-0 text-muted-foreground">
-                                                {marks.join(" ")}
-                                              </span>
-                                            ) : null}
-                                            {fkLabel ? (
-                                              <span className="min-w-0 truncate text-muted-foreground">
-                                                → {fkLabel}
-                                              </span>
-                                            ) : null}
-                                          </li>
-                                        );
-                                      })}
-                                      {extras.length > 0 ? (
-                                        <li className="mt-1 space-y-0.5 border-t border-border/60 pt-1">
-                                          {extras.map((constraint) => (
-                                            <div
-                                              key={constraint.name}
-                                              className="px-1 font-mono text-[11px] leading-snug text-muted-foreground"
-                                              title={`${constraint.name}: ${constraint.definition}`}
-                                            >
-                                              <span className="text-foreground/80">
-                                                {constraint.type === "PRIMARY KEY"
-                                                  ? "PK"
-                                                  : constraint.type === "FOREIGN KEY"
-                                                    ? "FK"
-                                                    : constraint.type === "UNIQUE"
-                                                      ? "UQ"
-                                                      : constraint.type}
-                                              </span>{" "}
-                                              <span className="truncate">
-                                                {constraint.columns.length > 0
-                                                  ? `(${constraint.columns.join(", ")})`
-                                                  : constraint.definition}
-                                              </span>
-                                            </div>
-                                          ))}
-                                        </li>
+                                      >
+                                        Show records
+                                      </DropdownMenuItem>
+                                      {!view ? (
+                                        <DropdownMenuItem
+                                          onSelect={() =>
+                                            void insertInsertTemplate(
+                                              schema,
+                                              table.name,
+                                            )
+                                          }
+                                        >
+                                          Generate INSERT
+                                        </DropdownMenuItem>
                                       ) : null}
-                                    </>
-                                  )}
-                                </ul>
+                                      <DropdownMenuItem
+                                        onSelect={() =>
+                                          void describeTable(schema, table.name)
+                                        }
+                                      >
+                                        Describe
+                                      </DropdownMenuItem>
+                                    </DropdownMenuContent>
+                                  </DropdownMenu>
+                                </div>
+                                {tableOpen ? (
+                                  <ul className="ml-4 border-l border-border pl-2 py-0.5">
+                                    {loadingDetail && !detail ? (
+                                      <li className="px-1 py-0.5 text-muted-foreground">
+                                        Loading…
+                                      </li>
+                                    ) : !detail || detail.columns.length === 0 ? (
+                                      <li className="px-1 py-0.5 text-muted-foreground">
+                                        No columns
+                                      </li>
+                                    ) : (
+                                      <>
+                                        {detail.columns.map((column) => {
+                                          const fk = column.foreignKey;
+                                          const marks: string[] = [];
+                                          if (column.isPrimaryKey) {
+                                            marks.push("PK");
+                                          }
+                                          if (column.isUnique) {
+                                            marks.push("UQ");
+                                          }
+                                          if (!column.isNullable) {
+                                            marks.push("NN");
+                                          }
+                                          const fkLabel = fk
+                                            ? `${fk.schema === schema ? "" : `${fk.schema}.`}${fk.table}.${fk.column}`
+                                            : null;
+                                          return (
+                                            <li
+                                              key={column.name}
+                                              className="flex items-baseline gap-1.5 px-1 py-0.5 font-mono text-[11px] leading-snug"
+                                              title={[
+                                                column.dataType,
+                                                column.isNullable
+                                                  ? "nullable"
+                                                  : "not null",
+                                                column.defaultValue
+                                                  ? `default ${column.defaultValue}`
+                                                  : null,
+                                                fk
+                                                  ? `FK ${fk.constraintName} → ${fkLabel}`
+                                                  : null,
+                                              ]
+                                                .filter(Boolean)
+                                                .join(" · ")}
+                                            >
+                                              <span className="min-w-0 truncate text-foreground">
+                                                {column.name}
+                                              </span>
+                                              <span className="shrink-0 truncate text-muted-foreground">
+                                                {column.dataType}
+                                              </span>
+                                              {marks.length > 0 ? (
+                                                <span className="shrink-0 text-muted-foreground">
+                                                  {marks.join(" ")}
+                                                </span>
+                                              ) : null}
+                                              {fkLabel ? (
+                                                <span className="min-w-0 truncate text-muted-foreground">
+                                                  → {fkLabel}
+                                                </span>
+                                              ) : null}
+                                            </li>
+                                          );
+                                        })}
+                                        {extras.length > 0 ? (
+                                          <li className="mt-1 space-y-0.5 border-t border-border/60 pt-1">
+                                            {extras.map((constraint) => (
+                                              <div
+                                                key={constraint.name}
+                                                className="px-1 font-mono text-[11px] leading-snug text-muted-foreground"
+                                                title={`${constraint.name}: ${constraint.definition}`}
+                                              >
+                                                <span className="text-foreground/80">
+                                                  {constraint.type === "PRIMARY KEY"
+                                                    ? "PK"
+                                                    : constraint.type === "FOREIGN KEY"
+                                                      ? "FK"
+                                                      : constraint.type === "UNIQUE"
+                                                        ? "UQ"
+                                                        : constraint.type}
+                                                </span>{" "}
+                                                <span className="truncate">
+                                                  {constraint.columns.length > 0
+                                                    ? `(${constraint.columns.join(", ")})`
+                                                    : constraint.definition}
+                                                </span>
+                                              </div>
+                                            ))}
+                                          </li>
+                                        ) : null}
+                                      </>
+                                    )}
+                                  </ul>
+                                ) : null}
+                              </li>
+                            );
+                          };
+
+                          return (
+                            <>
+                              {baseTables.length > 0 ? (
+                                <>
+                                  <li className="px-1 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                                    Tables
+                                  </li>
+                                  {baseTables.map(renderRelation)}
+                                </>
                               ) : null}
-                            </li>
+                              {views.length > 0 ? (
+                                <>
+                                  <li className="px-1 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                                    Views
+                                  </li>
+                                  {views.map(renderRelation)}
+                                </>
+                              ) : null}
+                            </>
                           );
-                        })
+                        })()
                       )}
                     </ul>
                   ) : null}

@@ -42,8 +42,42 @@ export function resultToCsv(result: QueryResult): string {
   return `\uFEFF${header}\r\n${body}\r\n`;
 }
 
+/** TSV с заголовками — удобно вставлять в Sheets / Excel / Notion. */
+export function resultToTsv(result: QueryResult): string {
+  const cell = (value: unknown): string => {
+    const text = formatCell(value);
+    if (/[\t\r\n]/.test(text)) {
+      return text.replaceAll("\t", " ").replaceAll(/\r?\n/g, " ");
+    }
+    return text;
+  };
+  const header = result.columns.map(cell).join("\t");
+  const body = result.rows
+    .map((row) => result.columns.map((column) => cell(row[column])).join("\t"))
+    .join("\n");
+  return `${header}\n${body}\n`;
+}
+
 export function resultToJson(result: QueryResult): string {
   return `${JSON.stringify(result.rows, null, 2)}\n`;
+}
+
+/** Markdown-таблица с заголовками. */
+export function resultToMarkdown(result: QueryResult): string {
+  const escape = (value: unknown): string =>
+    formatCell(value).replaceAll("|", "\\|").replaceAll(/\r?\n/g, "<br>");
+  if (result.columns.length === 0) {
+    return "";
+  }
+  const header = `| ${result.columns.map(escape).join(" | ")} |`;
+  const sep = `| ${result.columns.map(() => "---").join(" | ")} |`;
+  const body = result.rows
+    .map(
+      (row) =>
+        `| ${result.columns.map((column) => escape(row[column])).join(" | ")} |`,
+    )
+    .join("\n");
+  return `${header}\n${sep}\n${body}\n`;
 }
 
 function stamp(): string {
@@ -84,5 +118,13 @@ export function downloadResultJson(result: QueryResult) {
     resultToJson(result),
     `query-result-${stamp()}.json`,
     "application/json;charset=utf-8",
+  );
+}
+
+export function downloadResultMarkdown(result: QueryResult) {
+  downloadText(
+    resultToMarkdown(result),
+    `query-result-${stamp()}.md`,
+    "text/markdown;charset=utf-8",
   );
 }

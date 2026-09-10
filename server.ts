@@ -378,6 +378,50 @@ export const rpcContract = defineRpcContract({
     input: z.null(),
     output: z.object({ ok: z.literal(true) }).strict(),
   },
+  listBookmarks: {
+    input: z.null(),
+    output: z
+      .object({
+        items: z.array(
+          z
+            .object({
+              id: z.string(),
+              title: z.string(),
+              sql: z.string(),
+              connectionId: z.string().nullable(),
+              createdAt: z.string(),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
+  },
+  addBookmark: {
+    input: z
+      .object({
+        title: z.string().min(1).max(200),
+        sql: z.string().min(1),
+        connectionId: z.string().nullable().optional(),
+      })
+      .strict(),
+    output: z
+      .object({
+        item: z
+          .object({
+            id: z.string(),
+            title: z.string(),
+            sql: z.string(),
+            connectionId: z.string().nullable(),
+            createdAt: z.string(),
+          })
+          .strict(),
+      })
+      .strict(),
+  },
+  deleteBookmark: {
+    input: z.object({ id: z.string().min(1) }).strict(),
+    output: z.object({ ok: z.literal(true) }).strict(),
+  },
   readSqlFile: {
     input: z
       .object({
@@ -466,6 +510,13 @@ export default async function plugin(bb: BbPluginApi) {
     `ALTER TABLE connections ADD COLUMN ssl_ca_path TEXT`,
     `ALTER TABLE connections ADD COLUMN ssl_cert_path TEXT`,
     `ALTER TABLE connections ADD COLUMN ssl_key_path TEXT`,
+    `CREATE TABLE IF NOT EXISTS bookmarks (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      sql TEXT NOT NULL,
+      connection_id TEXT,
+      created_at TEXT NOT NULL
+    )`,
   ]);
 
   const pluginDataDir = path.dirname(String((db as { name?: string }).name ?? ""));
@@ -1035,6 +1086,57 @@ export default async function plugin(bb: BbPluginApi) {
 
     clearHistory: () => {
       db.prepare(`DELETE FROM query_history`).run();
+      publishUi();
+      return { ok: true as const };
+    },
+
+    listBookmarks: () => {
+      const rows = db
+        .prepare(
+          `SELECT id, title, sql, connection_id, created_at
+           FROM bookmarks
+           ORDER BY created_at DESC`,
+        )
+        .all() as {
+        id: string;
+        title: string;
+        sql: string;
+        connection_id: string | null;
+        created_at: string;
+      }[];
+      return {
+        items: rows.map((row) => ({
+          id: row.id,
+          title: row.title,
+          sql: row.sql,
+          connectionId: row.connection_id,
+          createdAt: row.created_at,
+        })),
+      };
+    },
+
+    addBookmark: (input) => {
+      const id = crypto.randomUUID();
+      const createdAt = new Date().toISOString();
+      const connectionId = input.connectionId ?? null;
+      db.prepare(
+        `INSERT INTO bookmarks (id, title, sql, connection_id, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(id, input.title, input.sql, connectionId, createdAt);
+      publishUi();
+      return {
+        item: {
+          id,
+          title: input.title,
+          sql: input.sql,
+          connectionId,
+          createdAt,
+        },
+      };
+    },
+
+    deleteBookmark: ({ id }) => {
+      db.prepare(`DELETE FROM bookmarks WHERE id = ?`).run(id);
       publishUi();
       return { ok: true as const };
     },

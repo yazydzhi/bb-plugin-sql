@@ -65,12 +65,14 @@ credential/trust work that remains before 0.4.
 
 Still **read-only** execution. Copy-paste write aids only.
 
-- [ ] Bookmarks
+- [x] Bookmarks (save / load / delete from Query toolbar)
 - [ ] Query parameters (`:name` / prompts)
-- [ ] Generate INSERT template (copy-paste aid; execution stays read-only)
-- [ ] Views in the tree; light SQL format
-- [ ] **Run from chat:** execute button on fenced `sql` (and selection) → pick
-  connection → open/focus SQL Actions panel → new result tab (read-only)
+- [x] Generate INSERT template (copy-paste aid; execution stays read-only)
+- [x] Views in the tree (separate **Tables** / **Views** groups); light SQL format
+- [x] Query toolbar layout: Open → connection → connect icons → History/Bookmarks block → Run;
+  Format as editor corner link
+- [x] **Run from chat:** message / selection **Run SQL** → pick connection →
+  open/focus SQL Actions panel → auto-run → new result tab (read-only)
 
 ## 0.5 — Controlled write
 

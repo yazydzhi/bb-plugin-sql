@@ -1,8 +1,9 @@
-// bb-plugin-sql — UI slots: nav explorer + query (fixed tab / Actions) + .sql opener.
+// bb-plugin-sql — UI slots: nav explorer + query (fixed tab / Actions) + .sql opener + Run from chat.
 import { definePluginApp } from "@get-bb/plugin-sdk/app";
 import { SqlExplorer } from "@/components/sql/SqlExplorer";
 import { SqlFileOpener } from "@/components/sql/SqlFileOpener";
 import { SqlQueryWorkspace } from "@/components/sql/SqlQueryWorkspace";
+import { runSqlFromChat } from "@/lib/run-sql-from-chat";
 
 function SqlExplorerPage() {
   return <SqlExplorer />;
@@ -54,5 +55,19 @@ export default definePluginApp((app) => {
     title: "SQL",
     extensions: ["sql"],
     component: SqlFileOpener,
+  });
+
+  // Выделение / кнопка у сообщения → Run SQL
+  app.slots.messageAction({
+    id: "run-sql",
+    title: "Run SQL",
+    icon: "Play",
+    async run({ message, selectedText, openPanel }) {
+      await runSqlFromChat({
+        selectedText,
+        messageText: message.text,
+        openPanel: (options) => openPanel(options),
+      });
+    },
   });
 });
