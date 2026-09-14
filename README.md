@@ -3,13 +3,14 @@
 SQLTools-style Postgres panel for [bb](https://get-bb.dev): manage connections,
 browse schemas/tables, and run SQL from a panel or agent tools.
 
+> **0.6 schema completion.** In the Query editor: type after `FROM`/`SELECT` or
+> press Ctrl/Cmd+Space for keywords, tables, and columns (ranked by your past
+> accepts). Tab/Enter inserts; Esc closes.
+>
 > **0.5 controlled write.** UI connections default to **read/write**. **Allow DDL**
 > and **Agent write** are off by default (separate checkboxes). Confirm before
 > DML/DDL; DROP / DELETE / unsafe UPDATE may require typing the table name.
 > Admin statements (SET/VACUUM/…) stay blocked.
->
-> **0.5 — контролируемая запись.** В UI по умолчанию read/write. Allow DDL и
-> Agent write по умолчанию выключены. Admin-команды по-прежнему запрещены.
 
 ## Install
 

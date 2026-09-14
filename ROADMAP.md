@@ -123,16 +123,16 @@ First release that can mutate data from the UI (and optionally from the agent).
 Highest ROI next for both humans and agents on the existing PG path.
 Stay on the lightweight editor (no Monaco/LSP yet).
 
-- [ ] **Schema cache** from browse / catalog (schemas, tables, columns, types);
-  refresh on Connect and on demand
-- [ ] **Completion popup** at caret: keywords/snippets + prefix/fuzzy on
-  tables/columns (overlay list; no editor swap)
-- [ ] **Personal ranking** (local, per connection): boost objects accepted
-  from the popup and/or seen in successful Runs
-- [ ] **Context slots (light parse):** after `FROM`/`JOIN` → tables;
+- [x] **Schema cache** from browse / catalog (schemas, tables, columns, types);
+  refresh on Connect and on demand (`getSchemaCatalog`)
+- [x] **Completion popup** at caret: keywords/snippets + prefix/fuzzy on
+  tables/columns (overlay list; no editor swap); Ctrl/Cmd+Space
+- [x] **Personal ranking** (local, per connection): boost objects accepted
+  from the popup (`completion_stats`)
+- [x] **Context slots (light parse):** after `FROM`/`JOIN` → tables;
   after `SELECT`/`WHERE` / `alias.` → columns; `schema.table` qualification
-- [ ] **Alias resolution** for the current statement (`FROM users u` → `u.`)
-- [ ] Hover (optional in same release): column type / nullable from cache
+- [x] **Alias resolution** for the current statement (`FROM users u` → `u.`)
+- [x] Detail line in popup: column type / nullable (hover-like)
 
 **Out of 0.6:** JOIN-FK hints, full LSP, LLM ghost-text.
 
@@ -206,4 +206,5 @@ Candidate themes (pick by feedback, not a commitment):
 ## Feedback
 
 Issues and PRs on the GitHub repo are welcome. The plugin is listed in
-bb-community (`^0.5.4`). Next public slice: **0.6 schema completion**.
+bb-community (`^0.5.4`). **0.6 schema completion** lands in `v0.6.0` (path install);
+bump marketplace range when tagging.

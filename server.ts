@@ -16,6 +16,7 @@ import {
   listColumns as driverListColumns,
   listSchemas as driverListSchemas,
   listTables as driverListTables,
+  fetchSchemaCatalog as driverFetchSchemaCatalog,
   reconnectPool,
   runQuery as driverRunQuery,
   testConnection as driverTestConnection,
@@ -270,6 +271,57 @@ export const rpcContract = defineRpcContract({
         ),
       })
       .strict(),
+  },
+  getSchemaCatalog: {
+    input: z.object({ connectionId: z.string().min(1) }).strict(),
+    output: z
+      .object({
+        schemas: z.array(z.string()),
+        tables: z.array(
+          z
+            .object({
+              schema: z.string(),
+              name: z.string(),
+              type: z.string(),
+              columns: z.array(
+                z
+                  .object({
+                    name: z.string(),
+                    dataType: z.string(),
+                    isNullable: z.boolean(),
+                  })
+                  .strict(),
+              ),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
+  },
+  listCompletionStats: {
+    input: z.object({ connectionId: z.string().min(1) }).strict(),
+    output: z
+      .object({
+        usages: z.array(
+          z
+            .object({
+              usageKey: z.string(),
+              uses: z.number().int(),
+              lastUsedAt: z.string(),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
+  },
+  recordCompletionUse: {
+    input: z
+      .object({
+        connectionId: z.string().min(1),
+        usageKey: z.string().min(1),
+      })
+      .strict(),
+    output: z.object({ ok: z.literal(true) }).strict(),
   },
   describeTable: {
     input: z
@@ -611,6 +663,14 @@ export default async function plugin(bb: BbPluginApi) {
     `ALTER TABLE connections ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'readwrite'`,
     `ALTER TABLE connections ADD COLUMN agent_write INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE connections ADD COLUMN allow_ddl INTEGER NOT NULL DEFAULT 0`,
+    // 0.6: частота выбора объектов автодополнения.
+    `CREATE TABLE IF NOT EXISTS completion_stats (
+      connection_id TEXT NOT NULL,
+      usage_key TEXT NOT NULL,
+      uses INTEGER NOT NULL DEFAULT 0,
+      last_used_at TEXT NOT NULL,
+      PRIMARY KEY (connection_id, usage_key)
+    )`,
   ]);
 
   const pluginDataDir = path.dirname(String((db as { name?: string }).name ?? ""));
@@ -1074,6 +1134,46 @@ export default async function plugin(bb: BbPluginApi) {
       const row = requireRow(connectionId);
       const columns = await driverListColumns(poolFor(row), schema, table);
       return { columns };
+    },
+
+    getSchemaCatalog: async ({ connectionId }) => {
+      const row = requireRow(connectionId);
+      return driverFetchSchemaCatalog(poolFor(row));
+    },
+
+    listCompletionStats: ({ connectionId }) => {
+      requireRow(connectionId);
+      const rows = db
+        .prepare(
+          `SELECT usage_key, uses, last_used_at
+           FROM completion_stats
+           WHERE connection_id = ?`,
+        )
+        .all(connectionId) as {
+        usage_key: string;
+        uses: number;
+        last_used_at: string;
+      }[];
+      return {
+        usages: rows.map((row) => ({
+          usageKey: row.usage_key,
+          uses: row.uses,
+          lastUsedAt: row.last_used_at,
+        })),
+      };
+    },
+
+    recordCompletionUse: ({ connectionId, usageKey }) => {
+      requireRow(connectionId);
+      const now = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO completion_stats (connection_id, usage_key, uses, last_used_at)
+         VALUES (?, ?, 1, ?)
+         ON CONFLICT (connection_id, usage_key) DO UPDATE SET
+           uses = uses + 1,
+           last_used_at = excluded.last_used_at`,
+      ).run(connectionId, usageKey, now);
+      return { ok: true as const };
     },
 
     describeTable: async ({ connectionId, schema, table }) => {

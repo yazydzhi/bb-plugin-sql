@@ -759,3 +759,78 @@ function cellToString(value: unknown): string {
   }
   return JSON.stringify(value);
 }
+
+/**
+ * Bulk-каталог схем/таблиц/колонок для автодополнения (без system schemas).
+ */
+export type SchemaCatalogSnapshot = {
+  schemas: string[];
+  tables: {
+    schema: string;
+    name: string;
+    type: string;
+    columns: { name: string; dataType: string; isNullable: boolean }[];
+  }[];
+};
+
+export async function fetchSchemaCatalog(
+  pool: pg.Pool,
+): Promise<SchemaCatalogSnapshot> {
+  const schemas = await listSchemas(pool);
+  if (schemas.length === 0) {
+    return { schemas: [], tables: [] };
+  }
+
+  const tablesResult = await pool.query<{
+    table_schema: string;
+    table_name: string;
+    table_type: string;
+  }>(
+    `SELECT table_schema, table_name, table_type
+     FROM information_schema.tables
+     WHERE table_schema = ANY($1::text[])
+     ORDER BY table_schema, table_name`,
+    [schemas],
+  );
+
+  const columnsResult = await pool.query<{
+    table_schema: string;
+    table_name: string;
+    column_name: string;
+    data_type: string;
+    is_nullable: string;
+  }>(
+    `SELECT table_schema, table_name, column_name, data_type, is_nullable
+     FROM information_schema.columns
+     WHERE table_schema = ANY($1::text[])
+     ORDER BY table_schema, table_name, ordinal_position`,
+    [schemas],
+  );
+
+  const columnsByTable = new Map<
+    string,
+    { name: string; dataType: string; isNullable: boolean }[]
+  >();
+  for (const row of columnsResult.rows) {
+    const key = `${row.table_schema}.${row.table_name}`;
+    const list = columnsByTable.get(key) ?? [];
+    list.push({
+      name: row.column_name,
+      dataType: row.data_type,
+      isNullable: row.is_nullable === "YES",
+    });
+    columnsByTable.set(key, list);
+  }
+
+  const tables = tablesResult.rows.map((row) => {
+    const key = `${row.table_schema}.${row.table_name}`;
+    return {
+      schema: row.table_schema,
+      name: row.table_name,
+      type: row.table_type,
+      columns: columnsByTable.get(key) ?? [],
+    };
+  });
+
+  return { schemas, tables };
+}

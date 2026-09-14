@@ -39,6 +39,11 @@ import {
   applySqlParams,
   extractSqlParamNamesFromQueries,
 } from "@/lib/sql-parameters";
+import type {
+  CompletionItem,
+  CompletionUsage,
+  SchemaCatalog,
+} from "@/lib/sql-completion";
 import { useOfflineStatusFade } from "@/hooks/use-offline-status-fade";
 import { SqlCodeEditor, type SqlEditorSelection } from "./SqlCodeEditor";
 import { connectOrReconnectWithPasswordPrompt } from "./connect-helpers";
@@ -134,6 +139,10 @@ export function SqlQueryWorkspace() {
   const [connections, setConnections] = useState<ConnectionListItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [sql, setSql] = useState("SELECT 1");
+  const [schemaCatalog, setSchemaCatalog] = useState<SchemaCatalog | null>(null);
+  const [completionUsages, setCompletionUsages] = useState<CompletionUsage[]>(
+    [],
+  );
   const [resultTabs, setResultTabs] = useState<ResultTab[]>([]);
   const [activeResultId, setActiveResultId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -238,6 +247,38 @@ export function SqlQueryWorkspace() {
     const { items } = await rpc.call("listBookmarks");
     setBookmarks(items);
   }, [rpc]);
+
+  const refreshSchemaCompletion = useCallback(
+    async (connectionId: string) => {
+      try {
+        const [catalog, stats] = await Promise.all([
+          rpc.call("getSchemaCatalog", { connectionId }),
+          rpc.call("listCompletionStats", { connectionId }),
+        ]);
+        setSchemaCatalog(catalog);
+        setCompletionUsages(stats.usages);
+      } catch {
+        setSchemaCatalog(null);
+        setCompletionUsages([]);
+      }
+    },
+    [rpc],
+  );
+
+  const selectedOnline =
+    selectedId != null &&
+    connectionStatusFromMap(statusById, selectedId) === "online";
+
+  useEffect(() => {
+    if (!selectedId || !selectedOnline) {
+      if (!selectedId) {
+        setSchemaCatalog(null);
+        setCompletionUsages([]);
+      }
+      return;
+    }
+    void refreshSchemaCompletion(selectedId);
+  }, [selectedId, selectedOnline, refreshSchemaCompletion]);
 
   const runSqlBatch = useCallback(
     async (connectionId: string, queries: string[]) => {
@@ -1125,6 +1166,20 @@ export function SqlQueryWorkspace() {
             onKeyDown={onEditorKeyDown}
             onSelectionChange={setEditorSelection}
             activeRange={activeHighlightRange}
+            catalog={schemaCatalog}
+            usages={completionUsages}
+            onAcceptCompletion={(item: CompletionItem) => {
+              if (!selectedId) {
+                return;
+              }
+              void rpc
+                .call("recordCompletionUse", {
+                  connectionId: selectedId,
+                  usageKey: item.usageKey,
+                })
+                .then(() => refreshSchemaCompletion(selectedId))
+                .catch(() => undefined);
+            }}
           />
         </div>
         <div

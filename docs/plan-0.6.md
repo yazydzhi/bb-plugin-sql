@@ -53,3 +53,10 @@ ranking and light context/alias awareness. No Monaco/LSP/LLM.
 ### Stage 6 — Ship hygiene
 - Bump `package.json` → `0.6.0`, README/ROADMAP checkboxes, reload.
 - **Check:** version string; ROADMAP 0.6 items `[x]` for landed scope.
+
+## Status (2026-09-14)
+
+Stages 0–5 implemented on path install `0.6.0`. Unit tests:
+`npm run test:completion` (7/7). Live Postgres catalog probe skipped when
+Docker is down — re-check `getSchemaCatalog` against `local` when PG is up.
+UI: Ctrl/Cmd+Space or type after FROM/SELECT; Tab/Enter accept.
