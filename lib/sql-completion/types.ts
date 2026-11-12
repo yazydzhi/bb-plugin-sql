@@ -34,6 +34,11 @@ export type CompletionItem = {
   /** Текст вставки (может отличаться от label). */
   insertText: string;
   detail?: string;
+  /**
+   * Доп. текст для фильтра по префиксу (например `trade_role_person trp`),
+   * чтобы короткие alias тоже подсказывались при вводе.
+   */
+  filterText?: string;
   /** Ключ для статистики: kind:qualifiedName */
   usageKey: string;
   score: number;

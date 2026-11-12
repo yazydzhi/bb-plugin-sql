@@ -206,7 +206,7 @@ export function ConnectionFormDialog({
               <span>
                 Read-only
                 <span className="mt-0.5 block text-xs text-muted-foreground">
-                  Default is read/write. Enable to block INSERT/UPDATE/DELETE in the UI.
+                  Off by default (read/write). Enable to block INSERT/UPDATE/DELETE in the UI.
                 </span>
               </span>
             </label>
@@ -222,7 +222,7 @@ export function ConnectionFormDialog({
               <span>
                 Agent write
                 <span className="mt-0.5 block text-xs text-muted-foreground">
-                  Off by default. Allows agent <code>sql_query</code> to run DML on
+                  On by default. Allows agent <code>sql_query</code> to run DML on
                   this connection (and DDL if Allow DDL is also on).
                 </span>
               </span>
@@ -239,8 +239,25 @@ export function ConnectionFormDialog({
               <span>
                 Allow DDL
                 <span className="mt-0.5 block text-xs text-muted-foreground">
-                  Off by default. Permits CREATE/ALTER/DROP/TRUNCATE/… in the UI.
+                  On by default. Permits CREATE/ALTER/DROP/TRUNCATE/… in the UI.
                   Agent also needs Agent write.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={form.showAllDatabases}
+                onChange={(event) =>
+                  setForm({ ...form, showAllDatabases: event.target.checked })
+                }
+              />
+              <span>
+                Show all databases
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  On by default (like DBeaver). Browse every database on the server,
+                  not only the one in the connection form.
                 </span>
               </span>
             </label>

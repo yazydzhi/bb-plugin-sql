@@ -4,26 +4,32 @@ SQLTools-style Postgres panel for [bb](https://get-bb.dev): manage connections,
 browse schemas/tables, and run SQL from a panel or agent tools.
 
 > **0.6 schema completion.** In the Query editor: type after `FROM`/`SELECT` or
-> press Ctrl/Cmd+Space for keywords, tables, and columns (ranked by your past
-> accepts). Tab/Enter inserts; Esc closes.
+> Ctrl/Cmd+Space — tables/columns/keywords with personal ranking. Tab accepts;
+> Enter keeps a newline; Esc closes. After `FROM`/`JOIN`, accepting a table
+> inserts a short alias (`trade t`, `trade_role_person trp`).
 >
-> **0.5 controlled write.** UI connections default to **read/write**. **Allow DDL**
-> and **Agent write** are off by default (separate checkboxes). Confirm before
-> DML/DDL; DROP / DELETE / unsafe UPDATE may require typing the table name.
-> Admin statements (SET/VACUUM/…) stay blocked.
+> **0.6.1 query session.** Editor SQL and result tabs survive switching bb tabs
+> (restored from the plugin server session; SQL also survives plugin restart).
+>
+> **0.6.2 all databases.** Like DBeaver’s “Show all databases”: browse every DB
+> on the server (not only the connection’s default). New connections default to
+> Read-only **off**, Agent write **on**, Allow DDL **on**, Show all databases **on**.
+>
+> **0.5 controlled write.** Confirm before DML/DDL; DROP / DELETE / unsafe UPDATE
+> may require typing the table name. Admin statements (SET/VACUUM/…) stay blocked.
 
 ## Install
 
 From a local checkout:
 
 ```bash
-bb plugin install ~/code/bb-plugin-sql --yes && bb plugin reload sql
+bb plugin install ~/code/9-Tools/bb-plugin-sql --yes && bb plugin reload sql
 ```
 
 For live reload while developing:
 
 ```bash
-cd ~/code/bb-plugin-sql && bb plugin install . --yes && bb plugin dev
+cd ~/code/9-Tools/bb-plugin-sql && bb plugin install . --yes && bb plugin dev
 ```
 
 Once published to GitHub (semver tags):

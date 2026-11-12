@@ -15,6 +15,8 @@ export type PublicConnection = {
   accessMode: AccessMode;
   agentWrite: boolean;
   allowDdl: boolean;
+  /** Показывать все БД сервера в дереве (не только connection.database). */
+  showAllDatabases: boolean;
   hasPassword: boolean;
   createdAt: string;
 };
@@ -105,12 +107,14 @@ export type ConnectionForm = {
   sslCaPath: string;
   sslCertPath: string;
   sslKeyPath: string;
-  /** Default readwrite. */
+  /** Default readwrite (Read-only off). */
   accessMode: AccessMode;
-  /** Default off. */
+  /** Default on — агент может писать. */
   agentWrite: boolean;
-  /** Default off — CREATE/ALTER/DROP/…. */
+  /** Default on — CREATE/ALTER/DROP/…. */
   allowDdl: boolean;
+  /** Default on — дерево всех БД на сервере. */
+  showAllDatabases: boolean;
   /** Временное поле: paste URI (не сохраняется). */
   uriPaste: string;
 };
@@ -153,8 +157,9 @@ export function emptyForm(): ConnectionForm {
     sslCertPath: "",
     sslKeyPath: "",
     accessMode: "readwrite",
-    agentWrite: false,
-    allowDdl: false,
+    agentWrite: true,
+    allowDdl: true,
+    showAllDatabases: true,
     uriPaste: "",
   };
 }

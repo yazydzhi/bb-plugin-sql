@@ -199,13 +199,18 @@ export function SqlCodeEditor({
         setActiveIndex((index) => (index - 1 + items.length) % items.length);
         return;
       }
-      if (event.key === "Enter" || event.key === "Tab") {
+      if (event.key === "Tab") {
         const item = items[activeIndex];
         if (item) {
           event.preventDefault();
           acceptItem(item);
           return;
         }
+      }
+      // Enter — обычный перевод строки; подсказку закрываем.
+      if (event.key === "Enter") {
+        setOpen(false);
+        setManualOpen(false);
       }
       if (event.key === "Escape") {
         event.preventDefault();

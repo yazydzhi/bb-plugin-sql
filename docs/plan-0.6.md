@@ -36,7 +36,7 @@ ranking and light context/alias awareness. No Monaco/LSP/LLM.
 
 ### Stage 3 — Editor popup (UI)
 - Wire catalog load on active connection connect/change.
-- Overlay list under caret; Tab/Enter accept; Esc/arrows navigate.
+- Overlay list under caret; Tab accept; Esc/arrows navigate.
 - **Check:** `bb plugin build` + install/reload; type in Query editor and
   accept a table name (manual or scripted if possible).
 
@@ -59,4 +59,4 @@ ranking and light context/alias awareness. No Monaco/LSP/LLM.
 Stages 0–5 implemented on path install `0.6.0`. Unit tests:
 `npm run test:completion` (7/7). Live Postgres catalog probe skipped when
 Docker is down — re-check `getSchemaCatalog` against `local` when PG is up.
-UI: Ctrl/Cmd+Space or type after FROM/SELECT; Tab/Enter accept.
+UI: Ctrl/Cmd+Space or type after FROM/SELECT; Tab accept (Enter = newline).

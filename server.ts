@@ -14,9 +14,11 @@ import {
   isConnected,
   describeTable as driverDescribeTable,
   listColumns as driverListColumns,
+  listDatabases as driverListDatabases,
   listSchemas as driverListSchemas,
   listTables as driverListTables,
   fetchSchemaCatalog as driverFetchSchemaCatalog,
+  databasePoolKey,
   reconnectPool,
   runQuery as driverRunQuery,
   testConnection as driverTestConnection,
@@ -51,10 +53,12 @@ const connectionPublicSchema = z
     sslKeyPath: z.string().nullable(),
     /** UI default: readwrite. */
     accessMode: accessModeSchema,
-    /** Agent DML/DDL; default off. */
+    /** Agent DML/DDL; default on for new connections. */
     agentWrite: z.boolean(),
-    /** CREATE/ALTER/DROP/…; default off. */
+    /** CREATE/ALTER/DROP/…; default on for new connections. */
     allowDdl: z.boolean(),
+    /** Show every DB on the server in the tree; default on. */
+    showAllDatabases: z.boolean(),
     hasPassword: z.boolean(),
     createdAt: z.string(),
   })
@@ -80,8 +84,9 @@ const connectionInputSchema = z
     password: z.string(),
     ssl: z.boolean().default(false),
     accessMode: accessModeSchema.default("readwrite"),
-    agentWrite: z.boolean().default(false),
-    allowDdl: z.boolean().default(false),
+    agentWrite: z.boolean().default(true),
+    allowDdl: z.boolean().default(true),
+    showAllDatabases: z.boolean().default(true),
     ...sslPathsSchema,
   })
   .strict();
@@ -100,6 +105,7 @@ const updateConnectionInputSchema = z
     accessMode: accessModeSchema,
     agentWrite: z.boolean(),
     allowDdl: z.boolean(),
+    showAllDatabases: z.boolean(),
     ...sslPathsSchema,
   })
   .strict();
@@ -136,6 +142,29 @@ const queryResultSchema = z
   })
   .strict();
 
+const resultTabSchema = z
+  .object({
+    id: z.string().min(1),
+    title: z.string(),
+    sql: z.string(),
+    connectionName: z.string(),
+    result: queryResultSchema,
+    createdAt: z.number(),
+  })
+  .strict();
+
+const querySessionSchema = z
+  .object({
+    editorSql: z.string(),
+    resultTabs: z.array(resultTabSchema).max(20),
+    activeResultId: z.string().nullable(),
+    editorRatio: z.number().min(0.1).max(0.95),
+  })
+  .strict();
+
+/** Лимит сериализованных вкладок результатов (~5 MiB), чтобы не раздувать prefs. */
+const QUERY_SESSION_TABS_MAX_CHARS = 5_000_000;
+
 export const rpcContract = defineRpcContract({
   listConnections: {
     input: z.null(),
@@ -145,6 +174,11 @@ export const rpcContract = defineRpcContract({
   },
   createConnection: {
     input: connectionInputSchema,
+    output: z.object({ connection: connectionPublicSchema }).strict(),
+  },
+  /** Копия настроек + пароля; имя «Name (copy)» / «Name (copy 2)»…. */
+  duplicateConnection: {
+    input: z.object({ id: z.string().min(1) }).strict(),
     output: z.object({ connection: connectionPublicSchema }).strict(),
   },
   updateConnection: {
@@ -231,8 +265,23 @@ export const rpcContract = defineRpcContract({
       })
       .strict(),
   },
-  listSchemas: {
+  listDatabases: {
     input: z.object({ connectionId: z.string().min(1) }).strict(),
+    output: z
+      .object({
+        databases: z.array(z.string()),
+        currentDatabase: z.string(),
+      })
+      .strict(),
+  },
+  listSchemas: {
+    input: z
+      .object({
+        connectionId: z.string().min(1),
+        /** Если задана и отличается от connection.database — вторичный пул. */
+        database: z.string().min(1).optional(),
+      })
+      .strict(),
     output: z.object({ schemas: z.array(z.string()) }).strict(),
   },
   listTables: {
@@ -240,6 +289,7 @@ export const rpcContract = defineRpcContract({
       .object({
         connectionId: z.string().min(1),
         schema: z.string().min(1),
+        database: z.string().min(1).optional(),
       })
       .strict(),
     output: z
@@ -256,6 +306,7 @@ export const rpcContract = defineRpcContract({
         connectionId: z.string().min(1),
         schema: z.string().min(1),
         table: z.string().min(1),
+        database: z.string().min(1).optional(),
       })
       .strict(),
     output: z
@@ -273,7 +324,12 @@ export const rpcContract = defineRpcContract({
       .strict(),
   },
   getSchemaCatalog: {
-    input: z.object({ connectionId: z.string().min(1) }).strict(),
+    input: z
+      .object({
+        connectionId: z.string().min(1),
+        database: z.string().min(1).optional(),
+      })
+      .strict(),
     output: z
       .object({
         schemas: z.array(z.string()),
@@ -329,6 +385,7 @@ export const rpcContract = defineRpcContract({
         connectionId: z.string().min(1),
         schema: z.string().min(1),
         table: z.string().min(1),
+        database: z.string().min(1).optional(),
       })
       .strict(),
     output: z
@@ -379,6 +436,8 @@ export const rpcContract = defineRpcContract({
         connectionId: z.string().min(1),
         sql: z.string().min(1),
         limit: z.number().int().positive().max(5000).optional(),
+        /** БД для выполнения (если show all databases). */
+        database: z.string().min(1).optional(),
         /** UI подтвердил опасный DML. */
         confirmed: z.boolean().optional(),
         /** Для type_table: имя таблицы как в assessment.targetTable. */
@@ -403,6 +462,8 @@ export const rpcContract = defineRpcContract({
     output: z
       .object({
         activeConnectionId: z.string().nullable(),
+        /** Рабочая БД для Query (если show all databases). */
+        activeDatabase: z.string().nullable(),
         draftSql: z.string().nullable(),
         draftAutoRun: z.boolean(),
         connectionSortMode: z.enum(["asc", "desc", "free"]),
@@ -411,6 +472,15 @@ export const rpcContract = defineRpcContract({
   },
   setActiveConnection: {
     input: z.object({ id: z.string().nullable() }).strict(),
+    output: z.object({ ok: z.literal(true) }).strict(),
+  },
+  setActiveDatabase: {
+    input: z
+      .object({
+        connectionId: z.string().min(1),
+        database: z.string().min(1).nullable(),
+      })
+      .strict(),
     output: z.object({ ok: z.literal(true) }).strict(),
   },
   setConnectionSortMode: {
@@ -451,6 +521,25 @@ export const rpcContract = defineRpcContract({
         autoRun: z.boolean(),
       })
       .strict(),
+  },
+  /**
+   * Сессия Query-панели: SQL + вкладки результатов переживают remount
+   * при переключении вкладок bb (0.6.1).
+   */
+  getQuerySession: {
+    input: z.null(),
+    output: querySessionSchema,
+  },
+  saveQuerySession: {
+    input: z
+      .object({
+        editorSql: z.string().optional(),
+        resultTabs: z.array(resultTabSchema).max(20).optional(),
+        activeResultId: z.string().nullable().optional(),
+        editorRatio: z.number().min(0.1).max(0.95).optional(),
+      })
+      .strict(),
+    output: z.object({ ok: z.literal(true) }).strict(),
   },
   listHistory: {
     input: z
@@ -563,10 +652,12 @@ type ConnectionRow = {
   ssl_key_path: string | null;
   /** "readonly" | "readwrite"; default readwrite. */
   access_mode: string;
-  /** 0/1; default 0. */
+  /** 0/1; default 0 для старых, 1 для новых create. */
   agent_write: number;
-  /** 0/1; default 0. */
+  /** 0/1; default 0 для старых, 1 для новых create. */
   allow_ddl: number;
+  /** 0/1; default 1 — показывать все БД. */
+  show_all_databases: number;
   created_at: string;
 };
 
@@ -584,6 +675,7 @@ type PublicConnection = {
   accessMode: AccessMode;
   agentWrite: boolean;
   allowDdl: boolean;
+  showAllDatabases: boolean;
   hasPassword: boolean;
   createdAt: string;
 };
@@ -593,6 +685,7 @@ const CONNECTION_SELECT = `id, name, host, port, database, "user", password, ssl
   COALESCE(access_mode, 'readwrite') AS access_mode,
   COALESCE(agent_write, 0) AS agent_write,
   COALESCE(allow_ddl, 0) AS allow_ddl,
+  COALESCE(show_all_databases, 1) AS show_all_databases,
   created_at`;
 
 function normalizePath(value: string | null | undefined): string | null {
@@ -610,6 +703,10 @@ function rowAgentWrite(row: ConnectionRow): boolean {
 
 function rowAllowDdl(row: ConnectionRow): boolean {
   return row.allow_ddl === 1;
+}
+
+function rowShowAllDatabases(row: ConnectionRow): boolean {
+  return row.show_all_databases !== 0;
 }
 
 /** Сравнивает имена таблиц без кавычек и регистра схемы. */
@@ -671,6 +768,8 @@ export default async function plugin(bb: BbPluginApi) {
       last_used_at TEXT NOT NULL,
       PRIMARY KEY (connection_id, usage_key)
     )`,
+    // 0.6.2: дерево всех БД на сервере (как DBeaver).
+    `ALTER TABLE connections ADD COLUMN show_all_databases INTEGER NOT NULL DEFAULT 1`,
   ]);
 
   const pluginDataDir = path.dirname(String((db as { name?: string }).name ?? ""));
@@ -711,16 +810,21 @@ export default async function plugin(bb: BbPluginApi) {
       accessMode: rowAccessMode(row),
       agentWrite: rowAgentWrite(row),
       allowDdl: rowAllowDdl(row),
+      showAllDatabases: rowShowAllDatabases(row),
       hasPassword: hasConnectionPassword(pluginDataDir, row.id),
       createdAt: row.created_at,
     };
   }
 
-  function toConfig(row: ConnectionRow, password: string): PostgresConfig {
+  function toConfig(
+    row: ConnectionRow,
+    password: string,
+    databaseOverride?: string,
+  ): PostgresConfig {
     return {
       host: row.host,
       port: row.port,
-      database: row.database,
+      database: databaseOverride?.trim() || row.database,
       user: row.user,
       password,
       ssl:
@@ -769,6 +873,96 @@ export default async function plugin(bb: BbPluginApi) {
       `INSERT INTO ui_prefs (key, value) VALUES (?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     ).run(key, value);
+  }
+
+  function activeDatabasePrefKey(connectionId: string): string {
+    return `activeDatabase:${connectionId}`;
+  }
+
+  function getActiveDatabase(connectionId: string, fallback: string): string {
+    const saved = getPref(activeDatabasePrefKey(connectionId));
+    return saved && saved.length > 0 ? saved : fallback;
+  }
+
+  type QuerySessionState = z.infer<typeof querySessionSchema>;
+
+  function defaultQuerySession(): QuerySessionState {
+    return {
+      editorSql: "SELECT 1",
+      resultTabs: [],
+      activeResultId: null,
+      editorRatio: 0.45,
+    };
+  }
+
+  /** In-memory: переживает remount UI; editorSql дополнительно в prefs. */
+  let querySession: QuerySessionState = (() => {
+    const session = defaultQuerySession();
+    const savedSql = getPref("editorSql");
+    if (savedSql !== null && savedSql.length > 0) {
+      session.editorSql = savedSql;
+    }
+    return session;
+  })();
+
+  function trimResultTabs(tabs: QuerySessionState["resultTabs"]) {
+    let next = tabs.slice(-20);
+    while (next.length > 0) {
+      const encoded = JSON.stringify(next);
+      if (encoded.length <= QUERY_SESSION_TABS_MAX_CHARS) {
+        return next;
+      }
+      next = next.slice(1);
+    }
+    return next;
+  }
+
+  function applyQuerySessionPatch(
+    patch: Partial<{
+      editorSql: string;
+      resultTabs: QuerySessionState["resultTabs"];
+      activeResultId: string | null;
+      editorRatio: number;
+    }>,
+  ): QuerySessionState {
+    if (patch.editorSql !== undefined) {
+      querySession.editorSql = patch.editorSql;
+      setPref(
+        "editorSql",
+        patch.editorSql.length > 0 ? patch.editorSql : null,
+      );
+    }
+    if (patch.resultTabs !== undefined) {
+      querySession.resultTabs = trimResultTabs(patch.resultTabs);
+      if (
+        querySession.activeResultId &&
+        !querySession.resultTabs.some(
+          (tab) => tab.id === querySession.activeResultId,
+        )
+      ) {
+        querySession.activeResultId =
+          querySession.resultTabs[querySession.resultTabs.length - 1]?.id ??
+          null;
+      }
+    }
+    if (patch.activeResultId !== undefined) {
+      const id = patch.activeResultId;
+      if (
+        id === null ||
+        querySession.resultTabs.some((tab) => tab.id === id)
+      ) {
+        querySession.activeResultId = id;
+      }
+    }
+    if (patch.editorRatio !== undefined) {
+      querySession.editorRatio = patch.editorRatio;
+    }
+    return {
+      editorSql: querySession.editorSql,
+      resultTabs: querySession.resultTabs,
+      activeResultId: querySession.activeResultId,
+      editorRatio: querySession.editorRatio,
+    };
   }
 
   type ConnectionSortMode = "asc" | "desc" | "free";
@@ -903,6 +1097,43 @@ export default async function plugin(bb: BbPluginApi) {
     return pool;
   }
 
+  /**
+   * Пул к конкретной БД. Для connection.database — основной пул;
+   * иначе вторичный `${id}::db::name` (нужен уже connected primary).
+   */
+  async function poolForDatabase(row: ConnectionRow, database?: string | null) {
+    const target = (database?.trim() || row.database).trim();
+    if (target === row.database) {
+      return poolFor(row);
+    }
+    // Primary должен быть online — иначе нет «корня» сессии.
+    poolFor(row);
+    const key = databasePoolKey(row.id, target);
+    const existing = getConnectedPool(key);
+    if (existing) {
+      return existing;
+    }
+    const resolved = resolvePassword(row);
+    if ("needsPassword" in resolved) {
+      throw new Error(
+        `Connection "${row.name}" has no stored password. Connect from the SQL panel first.`,
+      );
+    }
+    const result = await connectPool(
+      key,
+      toConfig(row, resolved.password, target),
+      rowAccessMode(row),
+    );
+    if (!result.ok) {
+      throw new Error(result.error ?? `Failed to open database "${target}"`);
+    }
+    const pool = getConnectedPool(key);
+    if (!pool) {
+      throw new Error(`Failed to open database "${target}"`);
+    }
+    return pool;
+  }
+
   /** Для agent tools: поднять пул, если ещё не connected. */
   async function ensurePool(row: ConnectionRow) {
     const existing = getConnectedPool(row.id);
@@ -946,13 +1177,15 @@ export default async function plugin(bb: BbPluginApi) {
       const sslCertPath = normalizePath(input.sslCertPath);
       const sslKeyPath = normalizePath(input.sslKeyPath);
       const accessMode = input.accessMode ?? "readwrite";
-      const agentWrite = input.agentWrite ?? false;
-      const allowDdl = input.allowDdl ?? false;
+      const agentWrite = input.agentWrite ?? true;
+      const allowDdl = input.allowDdl ?? true;
+      const showAllDatabases = input.showAllDatabases ?? true;
       db.prepare(
         `INSERT INTO connections
          (id, name, host, port, database, "user", password, ssl,
-          ssl_ca_path, ssl_cert_path, ssl_key_path, access_mode, agent_write, allow_ddl, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ssl_ca_path, ssl_cert_path, ssl_key_path, access_mode, agent_write, allow_ddl,
+          show_all_databases, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id,
         input.name,
@@ -967,6 +1200,7 @@ export default async function plugin(bb: BbPluginApi) {
         accessMode,
         agentWrite ? 1 : 0,
         allowDdl ? 1 : 0,
+        showAllDatabases ? 1 : 0,
         createdAt,
       );
       setConnectionPassword(pluginDataDir, id, input.password);
@@ -978,6 +1212,67 @@ export default async function plugin(bb: BbPluginApi) {
       return { connection: toPublic(requireRow(id)) };
     },
 
+    duplicateConnection: ({ id }) => {
+      const source = requireRow(id);
+      const existingNames = new Set(
+        (
+          db.prepare(`SELECT name FROM connections`).all() as { name: string }[]
+        ).map((row) => row.name),
+      );
+      let copyName = `${source.name} (copy)`;
+      if (existingNames.has(copyName)) {
+        let n = 2;
+        while (existingNames.has(`${source.name} (copy ${n})`)) {
+          n += 1;
+        }
+        copyName = `${source.name} (copy ${n})`;
+      }
+      const newId = crypto.randomUUID();
+      const createdAt = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO connections
+         (id, name, host, port, database, "user", password, ssl,
+          ssl_ca_path, ssl_cert_path, ssl_key_path, access_mode, agent_write, allow_ddl,
+          show_all_databases, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        newId,
+        copyName,
+        source.host,
+        source.port,
+        source.database,
+        source.user,
+        source.ssl,
+        source.ssl_ca_path,
+        source.ssl_cert_path,
+        source.ssl_key_path,
+        rowAccessMode(source),
+        rowAgentWrite(source) ? 1 : 0,
+        rowAllowDdl(source) ? 1 : 0,
+        rowShowAllDatabases(source) ? 1 : 0,
+        createdAt,
+      );
+      const password = getConnectionPassword(pluginDataDir, source.id);
+      if (password !== undefined) {
+        setConnectionPassword(pluginDataDir, newId, password);
+      } else if (source.password.length > 0) {
+        setConnectionPassword(pluginDataDir, newId, source.password);
+      } else {
+        setConnectionPassword(pluginDataDir, newId, "");
+      }
+      const order = getConnectionOrder();
+      const sourceIndex = order.indexOf(source.id);
+      if (sourceIndex >= 0) {
+        const next = [...order];
+        next.splice(sourceIndex + 1, 0, newId);
+        setConnectionOrder(next);
+      } else if (!order.includes(newId)) {
+        setConnectionOrder([...order, newId]);
+      }
+      publishUi();
+      return { connection: toPublic(requireRow(newId)) };
+    },
+
     updateConnection: async (input) => {
       requireRow(input.id);
       const sslCaPath = normalizePath(input.sslCaPath);
@@ -987,7 +1282,7 @@ export default async function plugin(bb: BbPluginApi) {
         `UPDATE connections
          SET name = ?, host = ?, port = ?, database = ?, "user" = ?, password = '',
              ssl = ?, ssl_ca_path = ?, ssl_cert_path = ?, ssl_key_path = ?,
-             access_mode = ?, agent_write = ?, allow_ddl = ?
+             access_mode = ?, agent_write = ?, allow_ddl = ?, show_all_databases = ?
          WHERE id = ?`,
       ).run(
         input.name,
@@ -1002,6 +1297,7 @@ export default async function plugin(bb: BbPluginApi) {
         input.accessMode,
         input.agentWrite ? 1 : 0,
         input.allowDdl ? 1 : 0,
+        input.showAllDatabases ? 1 : 0,
         input.id,
       );
       if (input.password !== undefined) {
@@ -1118,27 +1414,45 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: false, error: result.error };
     },
 
-    listSchemas: async ({ connectionId }) => {
+    listDatabases: async ({ connectionId }) => {
       const row = requireRow(connectionId);
-      const schemas = await driverListSchemas(poolFor(row));
+      const databases = await driverListDatabases(poolFor(row));
+      return { databases, currentDatabase: row.database };
+    },
+
+    listSchemas: async ({ connectionId, database }) => {
+      const row = requireRow(connectionId);
+      const schemas = await driverListSchemas(
+        await poolForDatabase(row, database),
+      );
       return { schemas };
     },
 
-    listTables: async ({ connectionId, schema }) => {
+    listTables: async ({ connectionId, schema, database }) => {
       const row = requireRow(connectionId);
-      const tables = await driverListTables(poolFor(row), schema);
+      const tables = await driverListTables(
+        await poolForDatabase(row, database),
+        schema,
+      );
       return { tables };
     },
 
-    listColumns: async ({ connectionId, schema, table }) => {
+    listColumns: async ({ connectionId, schema, table, database }) => {
       const row = requireRow(connectionId);
-      const columns = await driverListColumns(poolFor(row), schema, table);
+      const columns = await driverListColumns(
+        await poolForDatabase(row, database),
+        schema,
+        table,
+      );
       return { columns };
     },
 
-    getSchemaCatalog: async ({ connectionId }) => {
+    getSchemaCatalog: async ({ connectionId, database }) => {
       const row = requireRow(connectionId);
-      return driverFetchSchemaCatalog(poolFor(row));
+      const target =
+        database?.trim() ||
+        getActiveDatabase(connectionId, row.database);
+      return driverFetchSchemaCatalog(await poolForDatabase(row, target));
     },
 
     listCompletionStats: ({ connectionId }) => {
@@ -1176,9 +1490,13 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const };
     },
 
-    describeTable: async ({ connectionId, schema, table }) => {
+    describeTable: async ({ connectionId, schema, table, database }) => {
       const row = requireRow(connectionId);
-      return driverDescribeTable(poolFor(row), schema, table);
+      return driverDescribeTable(
+        await poolForDatabase(row, database),
+        schema,
+        table,
+      );
     },
 
     assessQuery: ({ connectionId, sql }) => {
@@ -1191,7 +1509,14 @@ export default async function plugin(bb: BbPluginApi) {
       });
     },
 
-    runQuery: async ({ connectionId, sql, limit, confirmed, confirmedTable }) => {
+    runQuery: async ({
+      connectionId,
+      sql,
+      limit,
+      database,
+      confirmed,
+      confirmedTable,
+    }) => {
       const row = requireRow(connectionId);
       const accessMode = rowAccessMode(row);
       const assessment = assessSqlStatement(sql, {
@@ -1222,21 +1547,45 @@ export default async function plugin(bb: BbPluginApi) {
         accessMode === "readonly" || !sqlNeedsWriteTransaction(sql, assessment.kind)
           ? "readonly"
           : "readwrite";
-      return driverRunQuery(poolFor(row), sql, {
+      const target =
+        database?.trim() ||
+        getActiveDatabase(connectionId, row.database);
+      return driverRunQuery(await poolForDatabase(row, target), sql, {
         limitRows: limit,
         transactionMode,
       });
     },
 
-    getUiState: () => ({
-      activeConnectionId: getPref("activeConnectionId"),
-      draftSql: getPref("draftSql"),
-      draftAutoRun: getPref("draftAutoRun") === "1",
-      connectionSortMode: getSortMode(),
-    }),
+    getUiState: () => {
+      const activeConnectionId = getPref("activeConnectionId");
+      let activeDatabase: string | null = null;
+      if (activeConnectionId) {
+        const row = getRow(activeConnectionId);
+        if (row) {
+          activeDatabase = getActiveDatabase(activeConnectionId, row.database);
+        }
+      }
+      return {
+        activeConnectionId,
+        activeDatabase,
+        draftSql: getPref("draftSql"),
+        draftAutoRun: getPref("draftAutoRun") === "1",
+        connectionSortMode: getSortMode(),
+      };
+    },
 
     setActiveConnection: ({ id }) => {
       setPref("activeConnectionId", id);
+      publishUi();
+      return { ok: true as const };
+    },
+
+    setActiveDatabase: ({ connectionId, database }) => {
+      requireRow(connectionId);
+      setPref(
+        activeDatabasePrefKey(connectionId),
+        database && database.trim().length > 0 ? database.trim() : null,
+      );
       publishUi();
       return { ok: true as const };
     },
@@ -1287,6 +1636,9 @@ export default async function plugin(bb: BbPluginApi) {
     setDraftSql: ({ sql, autoRun }) => {
       setPref("draftSql", sql.length > 0 ? sql : null);
       setPref("draftAutoRun", autoRun ? "1" : null);
+      if (sql.length > 0) {
+        applyQuerySessionPatch({ editorSql: sql });
+      }
       publishUi();
       return { ok: true as const };
     },
@@ -1297,9 +1649,22 @@ export default async function plugin(bb: BbPluginApi) {
       setPref("draftSql", null);
       setPref("draftAutoRun", null);
       if (sql !== null) {
+        applyQuerySessionPatch({ editorSql: sql });
         publishUi();
       }
       return { sql, autoRun };
+    },
+
+    getQuerySession: () => ({
+      editorSql: querySession.editorSql,
+      resultTabs: querySession.resultTabs,
+      activeResultId: querySession.activeResultId,
+      editorRatio: querySession.editorRatio,
+    }),
+
+    saveQuerySession: (patch) => {
+      applyQuerySessionPatch(patch);
+      return { ok: true as const };
     },
 
     listHistory: (input) => {
@@ -1484,10 +1849,10 @@ export default async function plugin(bb: BbPluginApi) {
       "DML needs Agent write; DDL also needs Allow DDL. Admin/session statements are never allowed.",
     instructions:
       "Use sql_query against configured Postgres connections. One statement per call. " +
-      "Reads always run in BEGIN READ ONLY. DML requires Agent write (default off). " +
-      "DDL (CREATE/ALTER/DROP/TRUNCATE/…) requires both Agent write and Allow DDL (both default off). " +
+      "Reads always run in BEGIN READ ONLY. DML requires Agent write (on by default for new connections). " +
+      "DDL (CREATE/ALTER/DROP/TRUNCATE/…) requires both Agent write and Allow DDL (also on by default for new). " +
       "UPDATE/DELETE without a selective WHERE are refused. SET/VACUUM/COPY/… are blocked. " +
-      "Ask the user to enable the connection flags if they need tool-driven mutations or schema changes.",
+      "If a connection has Agent write / Allow DDL off, ask the user to enable them.",
     presentation: {
       label: {
         pending: "Running SQL query",

@@ -64,12 +64,21 @@ type TableDetail = {
   constraints: ConstraintDetail[];
 };
 
-function tableKey(schema: string, table: string): string {
-  return `${schema}.${table}`;
+function tableKey(database: string, schema: string, table: string): string {
+  return `${database}.${schema}.${table}`;
 }
 
-function detailKey(connectionId: string, schema: string, table: string): string {
-  return `${connectionId}:${schema}.${table}`;
+function schemaExpandKey(database: string, schema: string): string {
+  return `${database}\0${schema}`;
+}
+
+function detailKey(
+  connectionId: string,
+  database: string,
+  schema: string,
+  table: string,
+): string {
+  return `${connectionId}:${database}.${schema}.${table}`;
 }
 
 function connectionStatus(
@@ -107,9 +116,19 @@ export function SqlExplorer() {
   const [statusById, setStatusById] = useState<
     Record<string, ConnectionStatusEntry>
   >({});
-  const [schemasById, setSchemasById] = useState<Record<string, string[]>>({});
-  const [tablesById, setTablesById] = useState<
+  const [databasesById, setDatabasesById] = useState<Record<string, string[]>>(
+    {},
+  );
+  /** schemas: connectionId → database → schema[] */
+  const [schemasByDb, setSchemasByDb] = useState<
+    Record<string, Record<string, string[]>>
+  >({});
+  /** tables: connectionId → "db\0schema" → tables */
+  const [tablesBySchema, setTablesBySchema] = useState<
     Record<string, Record<string, { name: string; type: string }[]>>
+  >({});
+  const [expandedDatabasesById, setExpandedDatabasesById] = useState<
+    Record<string, string[]>
   >({});
   const [expandedSchemasById, setExpandedSchemasById] = useState<
     Record<string, string[]>
@@ -124,6 +143,7 @@ export function SqlExplorer() {
     Record<string, boolean>
   >({});
   const [loadingTables, setLoadingTables] = useState<Set<string>>(new Set());
+  const [activeDatabase, setActiveDatabase] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<PublicConnection | null>(null);
   const [form, setForm] = useState<ConnectionForm>(emptyForm());
@@ -143,8 +163,19 @@ export function SqlExplorer() {
   const selectedError = selectedId
     ? connectionError(statusById, selectedId)
     : null;
-  const selectedSchemas = selectedId ? (schemasById[selectedId] ?? []) : [];
-  const selectedTables = selectedId ? (tablesById[selectedId] ?? {}) : {};
+  const selectedConnection =
+    selectedId != null
+      ? (connections.find((item) => item.id === selectedId) ?? null)
+      : null;
+  const showAllDatabases = selectedConnection?.showAllDatabases ?? true;
+  const selectedDatabases = selectedId ? (databasesById[selectedId] ?? []) : [];
+  const selectedSchemasByDb = selectedId ? (schemasByDb[selectedId] ?? {}) : {};
+  const selectedTablesBySchema = selectedId
+    ? (tablesBySchema[selectedId] ?? {})
+    : {};
+  const selectedExpandedDatabases = new Set(
+    selectedId ? (expandedDatabasesById[selectedId] ?? []) : [],
+  );
   const selectedExpandedSchemas = new Set(
     selectedId ? (expandedSchemasById[selectedId] ?? []) : [],
   );
@@ -168,12 +199,22 @@ export function SqlExplorer() {
   useOfflineStatusFade(statusById, setStatusById);
 
   const clearTreeCache = useCallback((connectionId: string) => {
-    setSchemasById((current) => {
+    setDatabasesById((current) => {
       const next = { ...current };
       delete next[connectionId];
       return next;
     });
-    setTablesById((current) => {
+    setSchemasByDb((current) => {
+      const next = { ...current };
+      delete next[connectionId];
+      return next;
+    });
+    setTablesBySchema((current) => {
+      const next = { ...current };
+      delete next[connectionId];
+      return next;
+    });
+    setExpandedDatabasesById((current) => {
       const next = { ...current };
       delete next[connectionId];
       return next;
@@ -216,6 +257,7 @@ export function SqlExplorer() {
     setStatusById((current) => mergeConnectionStatuses(current, next));
     const ui = await rpc.call("getUiState");
     setSortMode(ui.connectionSortMode);
+    setActiveDatabase(ui.activeDatabase);
     setSelectedId((current) => {
       const preferred = ui.activeConnectionId;
       if (preferred && next.some((item) => item.id === preferred)) {
@@ -331,64 +373,159 @@ export function SqlExplorer() {
   }, [patchConnectionStatus, rpc, selectedId]);
 
   useEffect(() => {
-    if (!selectedId || selectedStatus !== "online") {
+    if (!selectedId || selectedStatus !== "online" || !selectedConnection) {
       return;
     }
-    if (schemasById[selectedId]) {
+    if (showAllDatabases) {
+      if (databasesById[selectedId]) {
+        return;
+      }
+    } else if (schemasByDb[selectedId]?.[selectedConnection.database]) {
       return;
     }
     let cancelled = false;
     setLoadingTreeById((current) => ({ ...current, [selectedId]: true }));
-    void rpc
-      .call("listSchemas", { connectionId: selectedId })
-      .then(({ schemas: next }) => {
-        if (cancelled) {
-          return;
+    void (async () => {
+      try {
+        if (showAllDatabases) {
+          const { databases } = await rpc.call("listDatabases", {
+            connectionId: selectedId,
+          });
+          if (cancelled) {
+            return;
+          }
+          setDatabasesById((current) => ({
+            ...current,
+            [selectedId]: databases,
+          }));
+        } else {
+          const database = selectedConnection.database;
+          const { schemas } = await rpc.call("listSchemas", {
+            connectionId: selectedId,
+            database,
+          });
+          if (cancelled) {
+            return;
+          }
+          setSchemasByDb((current) => ({
+            ...current,
+            [selectedId]: {
+              ...(current[selectedId] ?? {}),
+              [database]: schemas,
+            },
+          }));
         }
-        setSchemasById((current) => ({ ...current, [selectedId]: next }));
-      })
-      .catch((error: unknown) => {
+      } catch (error: unknown) {
         if (!cancelled) {
           toast.error(error instanceof Error ? error.message : String(error));
         }
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) {
-          setLoadingTreeById((current) => ({ ...current, [selectedId]: false }));
+          setLoadingTreeById((current) => ({
+            ...current,
+            [selectedId]: false,
+          }));
         }
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [rpc, schemasById, selectedId, selectedStatus]);
+  }, [
+    rpc,
+    databasesById,
+    schemasByDb,
+    selectedConnection,
+    selectedId,
+    selectedStatus,
+    showAllDatabases,
+  ]);
 
-  async function toggleSchema(schema: string) {
+  async function chooseActiveDatabase(database: string) {
     if (!selectedId) {
       return;
     }
+    try {
+      await rpc.call("setActiveDatabase", {
+        connectionId: selectedId,
+        database,
+      });
+      setActiveDatabase(database);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function toggleDatabase(database: string) {
+    if (!selectedId) {
+      return;
+    }
+    const expanded = expandedDatabasesById[selectedId] ?? [];
+    if (expanded.includes(database)) {
+      setExpandedDatabasesById((current) => ({
+        ...current,
+        [selectedId]: expanded.filter((item) => item !== database),
+      }));
+      return;
+    }
+    setExpandedDatabasesById((current) => ({
+      ...current,
+      [selectedId]: [...expanded, database],
+    }));
+    void chooseActiveDatabase(database);
+    if (selectedSchemasByDb[database]) {
+      return;
+    }
+    try {
+      const { schemas } = await rpc.call("listSchemas", {
+        connectionId: selectedId,
+        database,
+      });
+      setSchemasByDb((current) => ({
+        ...current,
+        [selectedId]: {
+          ...(current[selectedId] ?? {}),
+          [database]: schemas,
+        },
+      }));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function toggleSchema(database: string, schema: string) {
+    if (!selectedId) {
+      return;
+    }
+    const key = schemaExpandKey(database, schema);
     const expanded = expandedSchemasById[selectedId] ?? [];
-    if (expanded.includes(schema)) {
+    if (expanded.includes(key)) {
       setExpandedSchemasById((current) => ({
         ...current,
-        [selectedId]: expanded.filter((item) => item !== schema),
+        [selectedId]: expanded.filter((item) => item !== key),
       }));
       return;
     }
     setExpandedSchemasById((current) => ({
       ...current,
-      [selectedId]: [...expanded, schema],
+      [selectedId]: [...expanded, key],
     }));
-    if (selectedTables[schema]) {
+    void chooseActiveDatabase(database);
+    if (selectedTablesBySchema[key]) {
       return;
     }
     try {
       const { tables } = await rpc.call("listTables", {
         connectionId: selectedId,
         schema,
+        database,
       });
-      setTablesById((current) => ({
+      setTablesBySchema((current) => ({
         ...current,
-        [selectedId]: { ...(current[selectedId] ?? {}), [schema]: tables },
+        [selectedId]: {
+          ...(current[selectedId] ?? {}),
+          [key]: tables,
+        },
       }));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -405,13 +542,14 @@ export function SqlExplorer() {
   }
 
   async function loadTableDetail(
+    database: string,
     schema: string,
     table: string,
   ): Promise<TableDetail | null> {
     if (!selectedId) {
       return null;
     }
-    const key = detailKey(selectedId, schema, table);
+    const key = detailKey(selectedId, database, schema, table);
     const cached = tableDetailsById[key];
     if (cached) {
       return cached;
@@ -422,6 +560,7 @@ export function SqlExplorer() {
         connectionId: selectedId,
         schema,
         table,
+        database,
       });
       setTableDetailsById((current) => ({ ...current, [key]: detail }));
       return detail;
@@ -437,11 +576,11 @@ export function SqlExplorer() {
     }
   }
 
-  async function toggleTable(schema: string, table: string) {
+  async function toggleTable(database: string, schema: string, table: string) {
     if (!selectedId) {
       return;
     }
-    const key = tableKey(schema, table);
+    const key = tableKey(database, schema, table);
     const expanded = expandedTablesById[selectedId] ?? [];
     if (expanded.includes(key)) {
       setExpandedTablesById((current) => ({
@@ -454,25 +593,35 @@ export function SqlExplorer() {
       ...current,
       [selectedId]: [...expanded, key],
     }));
-    await loadTableDetail(schema, table);
+    void chooseActiveDatabase(database);
+    await loadTableDetail(database, schema, table);
   }
 
-  function insertSelect(schema: string, table: string) {
+  function insertSelect(database: string, schema: string, table: string) {
+    void chooseActiveDatabase(database);
     void pushDraft(
       `SELECT * FROM ${quoteIdent(schema)}.${quoteIdent(table)} LIMIT 100`,
       false,
     );
   }
 
-  function showRecords(schema: string, table: string) {
-    void pushDraft(
-      `SELECT * FROM ${quoteIdent(schema)}.${quoteIdent(table)} LIMIT 100`,
-      true,
-    );
+  function showRecords(database: string, schema: string, table: string) {
+    void (async () => {
+      await chooseActiveDatabase(database);
+      await pushDraft(
+        `SELECT * FROM ${quoteIdent(schema)}.${quoteIdent(table)} LIMIT 100`,
+        true,
+      );
+    })();
   }
 
-  async function insertInsertTemplate(schema: string, table: string) {
-    const detail = await loadTableDetail(schema, table);
+  async function insertInsertTemplate(
+    database: string,
+    schema: string,
+    table: string,
+  ) {
+    await chooseActiveDatabase(database);
+    const detail = await loadTableDetail(database, schema, table);
     if (!detail) {
       return;
     }
@@ -505,12 +654,17 @@ export function SqlExplorer() {
     return { baseTables, views };
   }
 
-  async function describeTable(schema: string, table: string) {
-    setDescribeTitle(`${schema}.${table}`);
+  async function describeTable(
+    database: string,
+    schema: string,
+    table: string,
+  ) {
+    setDescribeTitle(`${database}.${schema}.${table}`);
     setDescribeOpen(true);
     setDescribeLoading(true);
     setDescribeDetail(null);
-    const detail = await loadTableDetail(schema, table);
+    await chooseActiveDatabase(database);
+    const detail = await loadTableDetail(database, schema, table);
     if (!detail) {
       setDescribeOpen(false);
       setDescribeLoading(false);
@@ -540,8 +694,9 @@ export function SqlExplorer() {
       sslCertPath: connection.sslCertPath ?? "",
       sslKeyPath: connection.sslKeyPath ?? "",
       accessMode: connection.accessMode ?? "readwrite",
-      agentWrite: connection.agentWrite ?? false,
-      allowDdl: connection.allowDdl ?? false,
+      agentWrite: connection.agentWrite ?? true,
+      allowDdl: connection.allowDdl ?? true,
+      showAllDatabases: connection.showAllDatabases ?? true,
       uriPaste: "",
     });
     setDialogOpen(true);
@@ -673,6 +828,7 @@ export function SqlExplorer() {
           accessMode: "readonly" | "readwrite";
           agentWrite: boolean;
           allowDdl: boolean;
+          showAllDatabases: boolean;
         } = {
           id: editing.id,
           name: form.name.trim(),
@@ -684,6 +840,7 @@ export function SqlExplorer() {
           accessMode: form.accessMode,
           agentWrite: form.agentWrite,
           allowDdl: form.allowDdl,
+          showAllDatabases: form.showAllDatabases,
           ...sslPaths,
         };
         if (form.password.length > 0) {
@@ -708,6 +865,7 @@ export function SqlExplorer() {
           accessMode: form.accessMode,
           agentWrite: form.agentWrite,
           allowDdl: form.allowDdl,
+          showAllDatabases: form.showAllDatabases,
           ...sslPaths,
         });
         await selectConnection(connection.id);
@@ -723,6 +881,19 @@ export function SqlExplorer() {
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function duplicateConnection(connection: ConnectionListItem) {
+    try {
+      const { connection: copy } = await rpc.call("duplicateConnection", {
+        id: connection.id,
+      });
+      toast.success(`Duplicated as “${copy.name}”`);
+      await refreshConnections();
+      await selectConnection(copy.id);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -993,6 +1164,11 @@ export function SqlExplorer() {
                       >
                         Edit
                       </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onSelect={() => void duplicateConnection(connection)}
+                      >
+                        Duplicate
+                      </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
                         onSelect={() => void removeConnection(connection)}
@@ -1011,9 +1187,14 @@ export function SqlExplorer() {
 
       <div className="min-h-0 flex-1 overflow-auto px-2 py-2">
         <div className="mb-1 px-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Schemas
+          {showAllDatabases ? "Databases" : "Schemas"}
+          {activeDatabase ? (
+            <span className="ml-1 normal-case tracking-normal text-muted-foreground/80">
+              · query: {activeDatabase}
+            </span>
+          ) : null}
         </div>
-        {!selectedId ? (
+        {!selectedId || !selectedConnection ? (
           <p className="px-1 text-muted-foreground">Select a connection.</p>
         ) : selectedStatus === "disconnected" ? (
           <p className="px-1 text-muted-foreground">
@@ -1026,237 +1207,360 @@ export function SqlExplorer() {
             Offline{selectedError ? `: ${selectedError}` : ""}. Use ⋮ → Connect
             / Reconnect.
           </p>
-        ) : selectedSchemas.length === 0 ? (
+        ) : showAllDatabases && selectedDatabases.length === 0 ? (
+          <p className="px-1 text-muted-foreground">No databases.</p>
+        ) : !showAllDatabases &&
+          (selectedSchemasByDb[selectedConnection.database] ?? []).length ===
+            0 ? (
           <p className="px-1 text-muted-foreground">No schemas.</p>
         ) : (
           <ul className="space-y-0.5">
-            {selectedSchemas.map((schema) => {
-              const open = selectedExpandedSchemas.has(schema);
-              const tables = selectedTables[schema];
+            {(showAllDatabases
+              ? selectedDatabases
+              : [selectedConnection.database]
+            ).map((database) => {
+              const dbOpen = showAllDatabases
+                ? selectedExpandedDatabases.has(database)
+                : true;
+              const schemas = selectedSchemasByDb[database];
+              const isDefaultDb = database === selectedConnection.database;
+              const isActiveDb = database === activeDatabase;
               return (
-                <li key={schema}>
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-state-hover"
-                    onClick={() => void toggleSchema(schema)}
-                  >
-                    <span className="w-3 shrink-0 text-muted-foreground">
-                      {open ? "▾" : "▸"}
-                    </span>
-                    <span className="truncate">{schema}</span>
-                  </button>
-                  {open ? (
-                    <ul className="ml-4 border-l border-border pl-2">
-                      {!tables ? (
-                        <li className="py-0.5 text-muted-foreground">Loading…</li>
-                      ) : tables.length === 0 ? (
-                        <li className="py-0.5 text-muted-foreground">Empty</li>
+                <li key={database}>
+                  {showAllDatabases ? (
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-state-hover"
+                      onClick={() => void toggleDatabase(database)}
+                    >
+                      <span className="w-3 shrink-0 text-muted-foreground">
+                        {dbOpen ? "▾" : "▸"}
+                      </span>
+                      <span className="truncate font-medium">{database}</span>
+                      {isDefaultDb ? (
+                        <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                          conn
+                        </span>
+                      ) : null}
+                      {isActiveDb ? (
+                        <span className="shrink-0 text-[10px] uppercase tracking-wide text-emerald-600">
+                          active
+                        </span>
+                      ) : null}
+                    </button>
+                  ) : null}
+                  {dbOpen ? (
+                    <ul
+                      className={
+                        showAllDatabases
+                          ? "ml-4 border-l border-border pl-2"
+                          : "space-y-0.5"
+                      }
+                    >
+                      {!schemas ? (
+                        <li className="py-0.5 text-muted-foreground">
+                          {showAllDatabases ? "Loading…" : "No schemas."}
+                        </li>
+                      ) : schemas.length === 0 ? (
+                        <li className="py-0.5 text-muted-foreground">
+                          No schemas
+                        </li>
                       ) : (
-                        (() => {
-                          const { baseTables, views } = partitionRelations(tables);
-                          const renderRelation = (
-                            table: { name: string; type: string },
-                          ) => {
-                            const key = tableKey(schema, table.name);
-                            const detailKeyForRow = selectedId
-                              ? detailKey(selectedId, schema, table.name)
-                              : key;
-                            const tableOpen = selectedExpandedTables.has(key);
-                            const detail = tableDetailsById[detailKeyForRow];
-                            const loadingDetail = loadingTables.has(detailKeyForRow);
-                            const extras = detail
-                              ? extraConstraints(detail.constraints)
-                              : [];
-                            const view = isViewRelation(table.type);
-                            return (
-                              <li key={key}>
-                                <div className="group flex items-center gap-0.5">
-                                  <button
-                                    type="button"
-                                    className="flex min-w-0 flex-1 items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-state-hover"
-                                    title={`${table.type}: ${schema}.${table.name}`}
-                                    onClick={() =>
-                                      void toggleTable(schema, table.name)
-                                    }
-                                  >
-                                    <span className="w-3 shrink-0 text-muted-foreground">
-                                      {tableOpen ? "▾" : "▸"}
-                                    </span>
-                                    <span className="truncate">{table.name}</span>
-                                    {view ? (
-                                      <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
-                                        view
-                                      </span>
-                                    ) : null}
-                                  </button>
-                                  <DropdownMenu>
-                                    <DropdownMenuTrigger asChild>
-                                      <Button
-                                        size="sm"
-                                        variant="ghost"
-                                        className="h-6 w-6 shrink-0 px-0 opacity-0 group-hover:opacity-100"
-                                        aria-label={`Actions for ${table.name}`}
-                                      >
-                                        ⋮
-                                      </Button>
-                                    </DropdownMenuTrigger>
-                                    <DropdownMenuContent align="end">
-                                      <DropdownMenuItem
-                                        onSelect={() =>
-                                          insertSelect(schema, table.name)
-                                        }
-                                      >
-                                        Insert SELECT
-                                      </DropdownMenuItem>
-                                      <DropdownMenuItem
-                                        onSelect={() =>
-                                          showRecords(schema, table.name)
-                                        }
-                                      >
-                                        Show records
-                                      </DropdownMenuItem>
-                                      {!view ? (
-                                        <DropdownMenuItem
-                                          onSelect={() =>
-                                            void insertInsertTemplate(
+                        schemas.map((schema) => {
+                          const schemaKey = schemaExpandKey(database, schema);
+                          const open = selectedExpandedSchemas.has(schemaKey);
+                          const tables = selectedTablesBySchema[schemaKey];
+                          return (
+                            <li key={schemaKey}>
+                              <button
+                                type="button"
+                                className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-state-hover"
+                                onClick={() =>
+                                  void toggleSchema(database, schema)
+                                }
+                              >
+                                <span className="w-3 shrink-0 text-muted-foreground">
+                                  {open ? "▾" : "▸"}
+                                </span>
+                                <span className="truncate">{schema}</span>
+                              </button>
+                              {open ? (
+                                <ul className="ml-4 border-l border-border pl-2">
+                                  {!tables ? (
+                                    <li className="py-0.5 text-muted-foreground">
+                                      Loading…
+                                    </li>
+                                  ) : tables.length === 0 ? (
+                                    <li className="py-0.5 text-muted-foreground">
+                                      Empty
+                                    </li>
+                                  ) : (
+                                    (() => {
+                                      const { baseTables, views } =
+                                        partitionRelations(tables);
+                                      const renderRelation = (table: {
+                                        name: string;
+                                        type: string;
+                                      }) => {
+                                        const key = tableKey(
+                                          database,
+                                          schema,
+                                          table.name,
+                                        );
+                                        const detailKeyForRow = selectedId
+                                          ? detailKey(
+                                              selectedId,
+                                              database,
                                               schema,
                                               table.name,
                                             )
-                                          }
-                                        >
-                                          Generate INSERT
-                                        </DropdownMenuItem>
-                                      ) : null}
-                                      <DropdownMenuItem
-                                        onSelect={() =>
-                                          void describeTable(schema, table.name)
-                                        }
-                                      >
-                                        Describe
-                                      </DropdownMenuItem>
-                                    </DropdownMenuContent>
-                                  </DropdownMenu>
-                                </div>
-                                {tableOpen ? (
-                                  <ul className="ml-4 border-l border-border pl-2 py-0.5">
-                                    {loadingDetail && !detail ? (
-                                      <li className="px-1 py-0.5 text-muted-foreground">
-                                        Loading…
-                                      </li>
-                                    ) : !detail || detail.columns.length === 0 ? (
-                                      <li className="px-1 py-0.5 text-muted-foreground">
-                                        No columns
-                                      </li>
-                                    ) : (
-                                      <>
-                                        {detail.columns.map((column) => {
-                                          const fk = column.foreignKey;
-                                          const marks: string[] = [];
-                                          if (column.isPrimaryKey) {
-                                            marks.push("PK");
-                                          }
-                                          if (column.isUnique) {
-                                            marks.push("UQ");
-                                          }
-                                          if (!column.isNullable) {
-                                            marks.push("NN");
-                                          }
-                                          const fkLabel = fk
-                                            ? `${fk.schema === schema ? "" : `${fk.schema}.`}${fk.table}.${fk.column}`
-                                            : null;
-                                          return (
-                                            <li
-                                              key={column.name}
-                                              className="flex items-baseline gap-1.5 px-1 py-0.5 font-mono text-[11px] leading-snug"
-                                              title={[
-                                                column.dataType,
-                                                column.isNullable
-                                                  ? "nullable"
-                                                  : "not null",
-                                                column.defaultValue
-                                                  ? `default ${column.defaultValue}`
-                                                  : null,
-                                                fk
-                                                  ? `FK ${fk.constraintName} → ${fkLabel}`
-                                                  : null,
-                                              ]
-                                                .filter(Boolean)
-                                                .join(" · ")}
-                                            >
-                                              <span className="min-w-0 truncate text-foreground">
-                                                {column.name}
-                                              </span>
-                                              <span className="shrink-0 truncate text-muted-foreground">
-                                                {column.dataType}
-                                              </span>
-                                              {marks.length > 0 ? (
-                                                <span className="shrink-0 text-muted-foreground">
-                                                  {marks.join(" ")}
-                                                </span>
-                                              ) : null}
-                                              {fkLabel ? (
-                                                <span className="min-w-0 truncate text-muted-foreground">
-                                                  → {fkLabel}
-                                                </span>
-                                              ) : null}
-                                            </li>
-                                          );
-                                        })}
-                                        {extras.length > 0 ? (
-                                          <li className="mt-1 space-y-0.5 border-t border-border/60 pt-1">
-                                            {extras.map((constraint) => (
-                                              <div
-                                                key={constraint.name}
-                                                className="px-1 font-mono text-[11px] leading-snug text-muted-foreground"
-                                                title={`${constraint.name}: ${constraint.definition}`}
+                                          : key;
+                                        const tableOpen =
+                                          selectedExpandedTables.has(key);
+                                        const detail =
+                                          tableDetailsById[detailKeyForRow];
+                                        const loadingDetail =
+                                          loadingTables.has(detailKeyForRow);
+                                        const extras = detail
+                                          ? extraConstraints(detail.constraints)
+                                          : [];
+                                        const view = isViewRelation(table.type);
+                                        return (
+                                          <li key={key}>
+                                            <div className="group flex items-center gap-0.5">
+                                              <button
+                                                type="button"
+                                                className="flex min-w-0 flex-1 items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-state-hover"
+                                                title={`${table.type}: ${database}.${schema}.${table.name}`}
+                                                onClick={() =>
+                                                  void toggleTable(
+                                                    database,
+                                                    schema,
+                                                    table.name,
+                                                  )
+                                                }
                                               >
-                                                <span className="text-foreground/80">
-                                                  {constraint.type === "PRIMARY KEY"
-                                                    ? "PK"
-                                                    : constraint.type === "FOREIGN KEY"
-                                                      ? "FK"
-                                                      : constraint.type === "UNIQUE"
-                                                        ? "UQ"
-                                                        : constraint.type}
-                                                </span>{" "}
-                                                <span className="truncate">
-                                                  {constraint.columns.length > 0
-                                                    ? `(${constraint.columns.join(", ")})`
-                                                    : constraint.definition}
+                                                <span className="w-3 shrink-0 text-muted-foreground">
+                                                  {tableOpen ? "▾" : "▸"}
                                                 </span>
-                                              </div>
-                                            ))}
+                                                <span className="truncate">
+                                                  {table.name}
+                                                </span>
+                                                {view ? (
+                                                  <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                                                    view
+                                                  </span>
+                                                ) : null}
+                                              </button>
+                                              <DropdownMenu>
+                                                <DropdownMenuTrigger asChild>
+                                                  <Button
+                                                    size="sm"
+                                                    variant="ghost"
+                                                    className="h-6 w-6 shrink-0 px-0 opacity-0 group-hover:opacity-100"
+                                                    aria-label={`Actions for ${table.name}`}
+                                                  >
+                                                    ⋮
+                                                  </Button>
+                                                </DropdownMenuTrigger>
+                                                <DropdownMenuContent align="end">
+                                                  <DropdownMenuItem
+                                                    onSelect={() =>
+                                                      insertSelect(
+                                                        database,
+                                                        schema,
+                                                        table.name,
+                                                      )
+                                                    }
+                                                  >
+                                                    Insert SELECT
+                                                  </DropdownMenuItem>
+                                                  <DropdownMenuItem
+                                                    onSelect={() =>
+                                                      showRecords(
+                                                        database,
+                                                        schema,
+                                                        table.name,
+                                                      )
+                                                    }
+                                                  >
+                                                    Show records
+                                                  </DropdownMenuItem>
+                                                  {!view ? (
+                                                    <DropdownMenuItem
+                                                      onSelect={() =>
+                                                        void insertInsertTemplate(
+                                                          database,
+                                                          schema,
+                                                          table.name,
+                                                        )
+                                                      }
+                                                    >
+                                                      Generate INSERT
+                                                    </DropdownMenuItem>
+                                                  ) : null}
+                                                  <DropdownMenuItem
+                                                    onSelect={() =>
+                                                      void describeTable(
+                                                        database,
+                                                        schema,
+                                                        table.name,
+                                                      )
+                                                    }
+                                                  >
+                                                    Describe
+                                                  </DropdownMenuItem>
+                                                </DropdownMenuContent>
+                                              </DropdownMenu>
+                                            </div>
+                                            {tableOpen ? (
+                                              <ul className="ml-4 border-l border-border pl-2 py-0.5">
+                                                {loadingDetail && !detail ? (
+                                                  <li className="px-1 py-0.5 text-muted-foreground">
+                                                    Loading…
+                                                  </li>
+                                                ) : !detail ||
+                                                  detail.columns.length ===
+                                                    0 ? (
+                                                  <li className="px-1 py-0.5 text-muted-foreground">
+                                                    No columns
+                                                  </li>
+                                                ) : (
+                                                  <>
+                                                    {detail.columns.map(
+                                                      (column) => {
+                                                        const fk =
+                                                          column.foreignKey;
+                                                        const marks: string[] =
+                                                          [];
+                                                        if (
+                                                          column.isPrimaryKey
+                                                        ) {
+                                                          marks.push("PK");
+                                                        }
+                                                        if (column.isUnique) {
+                                                          marks.push("UQ");
+                                                        }
+                                                        if (
+                                                          !column.isNullable
+                                                        ) {
+                                                          marks.push("NN");
+                                                        }
+                                                        const fkLabel = fk
+                                                          ? `${fk.schema === schema ? "" : `${fk.schema}.`}${fk.table}.${fk.column}`
+                                                          : null;
+                                                        return (
+                                                          <li
+                                                            key={column.name}
+                                                            className="flex items-baseline gap-1.5 px-1 py-0.5 font-mono text-[11px] leading-snug"
+                                                            title={[
+                                                              column.dataType,
+                                                              column.isNullable
+                                                                ? "nullable"
+                                                                : "not null",
+                                                              column.defaultValue
+                                                                ? `default ${column.defaultValue}`
+                                                                : null,
+                                                              fk
+                                                                ? `FK ${fk.constraintName} → ${fkLabel}`
+                                                                : null,
+                                                            ]
+                                                              .filter(Boolean)
+                                                              .join(" · ")}
+                                                          >
+                                                            <span className="min-w-0 truncate text-foreground">
+                                                              {column.name}
+                                                            </span>
+                                                            <span className="shrink-0 truncate text-muted-foreground">
+                                                              {column.dataType}
+                                                            </span>
+                                                            {marks.length >
+                                                            0 ? (
+                                                              <span className="shrink-0 text-muted-foreground">
+                                                                {marks.join(
+                                                                  " ",
+                                                                )}
+                                                              </span>
+                                                            ) : null}
+                                                            {fkLabel ? (
+                                                              <span className="min-w-0 truncate text-muted-foreground">
+                                                                → {fkLabel}
+                                                              </span>
+                                                            ) : null}
+                                                          </li>
+                                                        );
+                                                      },
+                                                    )}
+                                                    {extras.length > 0 ? (
+                                                      <li className="mt-1 space-y-0.5 border-t border-border/60 pt-1">
+                                                        {extras.map(
+                                                          (constraint) => (
+                                                            <div
+                                                              key={
+                                                                constraint.name
+                                                              }
+                                                              className="px-1 font-mono text-[11px] leading-snug text-muted-foreground"
+                                                              title={`${constraint.name}: ${constraint.definition}`}
+                                                            >
+                                                              <span className="text-foreground/80">
+                                                                {constraint.type ===
+                                                                "PRIMARY KEY"
+                                                                  ? "PK"
+                                                                  : constraint.type ===
+                                                                      "FOREIGN KEY"
+                                                                    ? "FK"
+                                                                    : constraint.type ===
+                                                                        "UNIQUE"
+                                                                      ? "UQ"
+                                                                      : constraint.type}
+                                                              </span>{" "}
+                                                              <span className="truncate">
+                                                                {constraint
+                                                                  .columns
+                                                                  .length > 0
+                                                                  ? `(${constraint.columns.join(", ")})`
+                                                                  : constraint.definition}
+                                                              </span>
+                                                            </div>
+                                                          ),
+                                                        )}
+                                                      </li>
+                                                    ) : null}
+                                                  </>
+                                                )}
+                                              </ul>
+                                            ) : null}
                                           </li>
-                                        ) : null}
-                                      </>
-                                    )}
-                                  </ul>
-                                ) : null}
-                              </li>
-                            );
-                          };
+                                        );
+                                      };
 
-                          return (
-                            <>
-                              {baseTables.length > 0 ? (
-                                <>
-                                  <li className="px-1 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                                    Tables
-                                  </li>
-                                  {baseTables.map(renderRelation)}
-                                </>
+                                      return (
+                                        <>
+                                          {baseTables.length > 0 ? (
+                                            <>
+                                              <li className="px-1 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                                                Tables
+                                              </li>
+                                              {baseTables.map(renderRelation)}
+                                            </>
+                                          ) : null}
+                                          {views.length > 0 ? (
+                                            <>
+                                              <li className="px-1 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                                                Views
+                                              </li>
+                                              {views.map(renderRelation)}
+                                            </>
+                                          ) : null}
+                                        </>
+                                      );
+                                    })()
+                                  )}
+                                </ul>
                               ) : null}
-                              {views.length > 0 ? (
-                                <>
-                                  <li className="px-1 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                                    Views
-                                  </li>
-                                  {views.map(renderRelation)}
-                                </>
-                              ) : null}
-                            </>
+                            </li>
                           );
-                        })()
+                        })
                       )}
                     </ul>
                   ) : null}

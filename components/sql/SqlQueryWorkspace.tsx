@@ -138,6 +138,8 @@ export function SqlQueryWorkspace() {
   const navigate = useBbNavigate();
   const [connections, setConnections] = useState<ConnectionListItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [activeDatabase, setActiveDatabase] = useState<string | null>(null);
+  const [availableDatabases, setAvailableDatabases] = useState<string[]>([]);
   const [sql, setSql] = useState("SELECT 1");
   const [schemaCatalog, setSchemaCatalog] = useState<SchemaCatalog | null>(null);
   const [completionUsages, setCompletionUsages] = useState<CompletionUsage[]>(
@@ -177,6 +179,7 @@ export function SqlQueryWorkspace() {
     selectionEnd: 0,
   });
   const autoRunRef = useRef(false);
+  const sessionHydratedRef = useRef(false);
   const openSqlInputRef = useRef<HTMLInputElement | null>(null);
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const dragRatioRef = useRef(DEFAULT_EDITOR_RATIO);
@@ -226,6 +229,7 @@ export function SqlQueryWorkspace() {
     setConnections(next);
     setStatusById((current) => mergeConnectionStatuses(current, next));
     const ui = await rpc.call("getUiState");
+    setActiveDatabase(ui.activeDatabase);
     setSelectedId((current) => {
       const preferred = ui.activeConnectionId;
       if (preferred && next.some((item) => item.id === preferred)) {
@@ -249,10 +253,16 @@ export function SqlQueryWorkspace() {
   }, [rpc]);
 
   const refreshSchemaCompletion = useCallback(
-    async (connectionId: string) => {
+    async (connectionId: string, database?: string | null) => {
       try {
+        const catalogInput: { connectionId: string; database?: string } = {
+          connectionId,
+        };
+        if (database) {
+          catalogInput.database = database;
+        }
         const [catalog, stats] = await Promise.all([
-          rpc.call("getSchemaCatalog", { connectionId }),
+          rpc.call("getSchemaCatalog", catalogInput),
           rpc.call("listCompletionStats", { connectionId }),
         ]);
         setSchemaCatalog(catalog);
@@ -265,6 +275,12 @@ export function SqlQueryWorkspace() {
     [rpc],
   );
 
+  const selectedConnection =
+    selectedId != null
+      ? (connections.find((item) => item.id === selectedId) ?? null)
+      : null;
+  const showAllDatabases = selectedConnection?.showAllDatabases ?? false;
+
   const selectedOnline =
     selectedId != null &&
     connectionStatusFromMap(statusById, selectedId) === "online";
@@ -274,11 +290,35 @@ export function SqlQueryWorkspace() {
       if (!selectedId) {
         setSchemaCatalog(null);
         setCompletionUsages([]);
+        setAvailableDatabases([]);
       }
       return;
     }
-    void refreshSchemaCompletion(selectedId);
-  }, [selectedId, selectedOnline, refreshSchemaCompletion]);
+    void refreshSchemaCompletion(selectedId, activeDatabase);
+  }, [selectedId, selectedOnline, activeDatabase, refreshSchemaCompletion]);
+
+  useEffect(() => {
+    if (!selectedId || !selectedOnline || !showAllDatabases) {
+      setAvailableDatabases([]);
+      return;
+    }
+    let cancelled = false;
+    void rpc
+      .call("listDatabases", { connectionId: selectedId })
+      .then(({ databases }) => {
+        if (!cancelled) {
+          setAvailableDatabases(databases);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAvailableDatabases([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [rpc, selectedId, selectedOnline, showAllDatabases]);
 
   const runSqlBatch = useCallback(
     async (connectionId: string, queries: string[]) => {
@@ -289,8 +329,11 @@ export function SqlQueryWorkspace() {
         toast.error("Enter a SQL query");
         return;
       }
-      const connectionName =
-        connections.find((item) => item.id === connectionId)?.name ?? connectionId;
+      const connection =
+        connections.find((item) => item.id === connectionId) ?? null;
+      const connectionName = connection?.name ?? connectionId;
+      const database =
+        activeDatabase?.trim() || connection?.database || undefined;
       setRunning(true);
       let lastError: string | null = null;
       try {
@@ -332,6 +375,7 @@ export function SqlQueryWorkspace() {
             const next = await rpc.call("runQuery", {
               connectionId,
               sql: trimmed,
+              ...(database ? { database } : {}),
               ...(confirmed ? { confirmed: true } : {}),
               ...(confirmedTable ? { confirmedTable } : {}),
             });
@@ -339,7 +383,9 @@ export function SqlQueryWorkspace() {
               id: crypto.randomUUID(),
               title: tabTitleFromSql(trimmed),
               sql: trimmed,
-              connectionName,
+              connectionName: database
+                ? `${connectionName}/${database}`
+                : connectionName,
               result: next,
               createdAt: Date.now(),
             };
@@ -369,7 +415,7 @@ export function SqlQueryWorkspace() {
         setRunning(false);
       }
     },
-    [connections, patchConnectionStatus, rpc, refreshHistory],
+    [activeDatabase, connections, patchConnectionStatus, rpc, refreshHistory],
   );
 
   const finishWriteConfirm = useCallback(
@@ -443,9 +489,19 @@ export function SqlQueryWorkspace() {
     }
   }, [rpc]);
 
+  const hydrateQuerySession = useCallback(async () => {
+    const session = await rpc.call("getQuerySession");
+    setSql(session.editorSql);
+    setResultTabs(session.resultTabs);
+    setActiveResultId(session.activeResultId);
+    setEditorRatio(session.editorRatio);
+    sessionHydratedRef.current = true;
+  }, [rpc]);
+
   useEffect(() => {
     void (async () => {
       try {
+        await hydrateQuerySession();
         await refreshConnections();
         await refreshHistory();
         await refreshBookmarks();
@@ -454,7 +510,13 @@ export function SqlQueryWorkspace() {
         toast.error(error instanceof Error ? error.message : String(error));
       }
     })();
-  }, [refreshConnections, refreshHistory, refreshBookmarks, applyDraft]);
+  }, [
+    hydrateQuerySession,
+    refreshConnections,
+    refreshHistory,
+    refreshBookmarks,
+    applyDraft,
+  ]);
 
   useRealtime("sql:ui", () => {
     void (async () => {
@@ -468,6 +530,45 @@ export function SqlQueryWorkspace() {
       }
     })();
   });
+
+  // Сохраняем SQL редактора (debounce), чтобы переживать remount вкладок.
+  useEffect(() => {
+    if (!sessionHydratedRef.current) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void rpc.call("saveQuerySession", { editorSql: sql }).catch(() => {
+        // ignore persist errors
+      });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [sql, rpc]);
+
+  // Вкладки результатов и активная — сразу в сессию сервера.
+  useEffect(() => {
+    if (!sessionHydratedRef.current) {
+      return;
+    }
+    void rpc
+      .call("saveQuerySession", {
+        resultTabs,
+        activeResultId,
+      })
+      .catch(() => {
+        // ignore persist errors
+      });
+  }, [resultTabs, activeResultId, rpc]);
+
+  useEffect(() => {
+    if (!sessionHydratedRef.current) {
+      return;
+    }
+    void rpc
+      .call("saveQuerySession", { editorRatio })
+      .catch(() => {
+        // ignore persist errors
+      });
+  }, [editorRatio, rpc]);
 
   useEffect(() => {
     if (!autoRunRef.current) {
@@ -952,6 +1053,53 @@ export function SqlQueryWorkspace() {
           </DropdownMenuContent>
         </DropdownMenu>
 
+        {showAllDatabases && selectedOnline ? (
+          <label className="flex h-8 items-center gap-1 text-xs text-muted-foreground">
+            <span className="sr-only">Database</span>
+            <select
+              className="h-8 max-w-[12rem] rounded-md border border-border bg-background px-2 text-xs text-foreground"
+              value={
+                activeDatabase ??
+                selectedConnection?.database ??
+                ""
+              }
+              disabled={availableDatabases.length === 0}
+              onChange={(event) => {
+                const database = event.target.value;
+                if (!selectedId || !database) {
+                  return;
+                }
+                void rpc
+                  .call("setActiveDatabase", {
+                    connectionId: selectedId,
+                    database,
+                  })
+                  .then(() => {
+                    setActiveDatabase(database);
+                  })
+                  .catch((error: unknown) => {
+                    toast.error(
+                      error instanceof Error ? error.message : String(error),
+                    );
+                  });
+              }}
+              aria-label="Active database"
+              title="Database for Run / completion"
+            >
+              {(availableDatabases.length > 0
+                ? availableDatabases
+                : selectedConnection
+                  ? [selectedConnection.database]
+                  : []
+              ).map((database) => (
+                <option key={database} value={database}>
+                  {database}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+
         <div className="flex h-8 shrink-0 items-center gap-0.5">
           {selectedStatus === "online" ? (
             <ToolbarIconButton
@@ -1177,7 +1325,9 @@ export function SqlQueryWorkspace() {
                   connectionId: selectedId,
                   usageKey: item.usageKey,
                 })
-                .then(() => refreshSchemaCompletion(selectedId))
+                .then(() =>
+                  refreshSchemaCompletion(selectedId, activeDatabase),
+                )
                 .catch(() => undefined);
             }}
           />

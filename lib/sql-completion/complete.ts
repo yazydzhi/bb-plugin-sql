@@ -5,6 +5,7 @@
 import { analyzeCompletionContext } from "./context.js";
 import { SQL_KEYWORDS } from "./keywords.js";
 import { rankCompletionItems } from "./rank.js";
+import { allocateTableAlias } from "./table-alias.js";
 import type {
   CompletionItem,
   CompletionUsage,
@@ -38,14 +39,104 @@ function keywordItems(): Omit<CompletionItem, "score">[] {
   }));
 }
 
-function allTables(catalog: SchemaCatalog): Omit<CompletionItem, "score">[] {
-  return catalog.tables.map((table) => ({
-    label: table.name,
-    kind: "table" as const,
-    insertText: table.name,
-    detail: `${table.schema}.${table.name} (${table.type})`,
-    usageKey: tableKey(table.schema, table.name),
-  }));
+function usedAliasesFromContext(
+  aliases: Record<string, unknown>,
+  fromRelations: { alias: string | null }[],
+  /** Префикс под курсором ещё не занят — пользователь его как раз набирает. */
+  editingPrefix?: string,
+): Set<string> {
+  const used = new Set<string>(
+    Object.keys(aliases).map((key) => key.toLowerCase()),
+  );
+  for (const rel of fromRelations) {
+    if (rel.alias) {
+      used.add(rel.alias.toLowerCase());
+    }
+  }
+  if (editingPrefix) {
+    used.delete(editingPrefix.toLowerCase());
+  }
+  return used;
+}
+
+/**
+ * Кандидаты таблиц. В слоте FROM/JOIN — вставка с коротким alias (`trade t`).
+ */
+function tableItems(
+  catalog: SchemaCatalog,
+  options: {
+    withAlias: boolean;
+    usedAliases: Set<string>;
+    schemaFilter?: string;
+  },
+): Omit<CompletionItem, "score">[] {
+  const tables = options.schemaFilter
+    ? catalog.tables.filter(
+        (table) =>
+          table.schema.toLowerCase() === options.schemaFilter!.toLowerCase(),
+      )
+    : catalog.tables;
+
+  return tables.map((table) => {
+    if (!options.withAlias) {
+      return {
+        label: table.name,
+        kind: "table" as const,
+        insertText: table.name,
+        detail: `${table.schema}.${table.name} (${table.type})`,
+        usageKey: tableKey(table.schema, table.name),
+      };
+    }
+
+    const alias = allocateTableAlias(table.name, options.usedAliases);
+    const insertText = `${table.name} ${alias}`;
+    return {
+      label: table.name,
+      kind: "table" as const,
+      insertText,
+      detail: `as ${alias} · ${table.schema}.${table.name}`,
+      filterText: `${table.name} ${alias}`,
+      usageKey: tableKey(table.schema, table.name),
+    };
+  });
+}
+
+/**
+ * Короткие alias как отдельные подсказки (ввод `trp` → trade_role_person trp).
+ * Только при непустом префиксе, чтобы не засорять список.
+ */
+function aliasShortcutItems(
+  catalog: SchemaCatalog,
+  usedAliases: Set<string>,
+  prefix: string,
+  schemaFilter?: string,
+): Omit<CompletionItem, "score">[] {
+  if (!prefix) {
+    return [];
+  }
+  const p = prefix.toLowerCase();
+  const tables = schemaFilter
+    ? catalog.tables.filter(
+        (table) => table.schema.toLowerCase() === schemaFilter.toLowerCase(),
+      )
+    : catalog.tables;
+
+  const items: Omit<CompletionItem, "score">[] = [];
+  for (const table of tables) {
+    const alias = allocateTableAlias(table.name, usedAliases);
+    if (!alias.startsWith(p)) {
+      continue;
+    }
+    items.push({
+      label: alias,
+      kind: "alias",
+      insertText: `${table.name} ${alias}`,
+      detail: `→ ${table.schema}.${table.name}`,
+      filterText: `${alias} ${table.name}`,
+      usageKey: `alias:${table.schema}.${table.name}:${alias}`,
+    });
+  }
+  return items;
 }
 
 function schemaItems(catalog: SchemaCatalog): Omit<CompletionItem, "score">[] {
@@ -111,6 +202,11 @@ export function completeSql(options: CompleteSqlOptions): CompletionItem[] {
   const ctx = analyzeCompletionContext(options.sql, options.cursor);
   const catalog = options.catalog;
   const raw: Omit<CompletionItem, "score">[] = [];
+  const usedAliases = usedAliasesFromContext(
+    ctx.aliases,
+    ctx.fromRelations,
+    ctx.prefix,
+  );
 
   if (ctx.slot === "none") {
     return [];
@@ -142,25 +238,34 @@ export function completeSql(options: CompleteSqlOptions): CompletionItem[] {
           ]),
         );
       } else {
-        // Возможно это schema. — тогда таблицы схемы.
-        const schemaName = ctx.qualifierRelation;
-        const tables = catalog.tables.filter(
-          (table) => table.schema.toLowerCase() === schemaName.toLowerCase(),
+        // Возможно это schema. — тогда таблицы схемы (с alias, если слот table).
+        const withAlias = ctx.slot === "table";
+        raw.push(
+          ...tableItems(catalog, {
+            withAlias,
+            usedAliases,
+            schemaFilter: ctx.qualifierRelation,
+          }),
         );
-        for (const table of tables) {
-          raw.push({
-            label: table.name,
-            kind: "table",
-            insertText: table.name,
-            detail: `${table.schema}.${table.name}`,
-            usageKey: tableKey(table.schema, table.name),
-          });
+        if (withAlias) {
+          raw.push(
+            ...aliasShortcutItems(
+              catalog,
+              usedAliases,
+              ctx.prefix,
+              ctx.qualifierRelation,
+            ),
+          );
         }
       }
     }
   } else if (ctx.slot === "table") {
     if (catalog) {
-      raw.push(...allTables(catalog), ...schemaItems(catalog));
+      raw.push(
+        ...tableItems(catalog, { withAlias: true, usedAliases }),
+        ...aliasShortcutItems(catalog, usedAliases, ctx.prefix),
+        ...schemaItems(catalog),
+      );
     }
     raw.push(...keywordItems());
   } else if (ctx.slot === "column") {
@@ -176,7 +281,8 @@ export function completeSql(options: CompleteSqlOptions): CompletionItem[] {
           ),
         );
       } else {
-        // Нет FROM — предлагаем все колонки + таблицы (часто печатают SELECT * FROM…).
+        // Нет FROM — предлагаем все колонки + таблицы без alias
+        // (часто печатают SELECT * FROM…).
         for (const table of catalog.tables) {
           raw.push(
             ...columnsForRelations(catalog, [
@@ -184,7 +290,7 @@ export function completeSql(options: CompleteSqlOptions): CompletionItem[] {
             ]),
           );
         }
-        raw.push(...allTables(catalog));
+        raw.push(...tableItems(catalog, { withAlias: false, usedAliases }));
       }
     }
     raw.push(...keywordItems());
@@ -192,7 +298,7 @@ export function completeSql(options: CompleteSqlOptions): CompletionItem[] {
     // keyword_or_any
     raw.push(...keywordItems());
     if (catalog) {
-      raw.push(...allTables(catalog), ...schemaItems(catalog));
+      raw.push(...tableItems(catalog, { withAlias: false, usedAliases }), ...schemaItems(catalog));
     }
   }
 
@@ -208,4 +314,9 @@ export function completeSql(options: CompleteSqlOptions): CompletionItem[] {
 
 export { analyzeCompletionContext } from "./context.js";
 export { rankCompletionItems, matchScore } from "./rank.js";
+export {
+  allocateTableAlias,
+  preferredTableAlias,
+  splitTableNameParts,
+} from "./table-alias.js";
 export type * from "./types.js";

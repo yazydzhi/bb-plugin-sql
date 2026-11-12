@@ -172,15 +172,28 @@ export async function reconnectPool(
 }
 
 /**
- * Закрывает и удаляет пул для connection id (после update/delete).
+ * Ключ вторичного пула к другой БД того же connection (show all databases).
+ */
+export function databasePoolKey(connectionId: string, database: string): string {
+  return `${connectionId}::db::${database}`;
+}
+
+/**
+ * Закрывает пул connection id и все вторичные пулы к другим БД того же коннекта.
  */
 export async function dropPool(connectionId: string): Promise<void> {
-  const entry = pools.get(connectionId);
-  if (!entry) {
-    return;
+  const prefix = `${connectionId}::db::`;
+  const keys = [...pools.keys()].filter(
+    (key) => key === connectionId || key.startsWith(prefix),
+  );
+  for (const key of keys) {
+    const entry = pools.get(key);
+    if (!entry) {
+      continue;
+    }
+    pools.delete(key);
+    await entry.pool.end();
   }
-  pools.delete(connectionId);
-  await entry.pool.end();
 }
 
 /**
@@ -210,6 +223,20 @@ export async function testConnection(
   } finally {
     await client.end().catch(() => undefined);
   }
+}
+
+/**
+ * Список БД на сервере, к которым можно подключиться (как «Show all databases» в DBeaver).
+ */
+export async function listDatabases(pool: pg.Pool): Promise<string[]> {
+  const result = await pool.query<{ datname: string }>(
+    `SELECT datname
+     FROM pg_database
+     WHERE datallowconn
+       AND NOT datistemplate
+     ORDER BY datname`,
+  );
+  return result.rows.map((row) => row.datname);
 }
 
 /**

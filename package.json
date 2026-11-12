@@ -1,7 +1,7 @@
 {
   "name": "bb-plugin-sql",
-  "version": "0.6.0",
-  "description": "SQLTools-style Postgres panel for bb: browse schemas/tables, schema-aware SQL completion (0.6), controlled write/DDL (0.5). Agents: sql_query + sql_list_connections.",
+  "version": "0.6.3",
+  "description": "SQLTools-style Postgres panel for bb: all-databases tree, schema completion with table aliases, query session persistence, duplicate connections, controlled write/DDL. Agents: sql_query + sql_list_connections.",
   "license": "MIT",
   "type": "module",
   "repository": {
@@ -14,7 +14,7 @@
   },
   "bb": {
     "name": "SQL",
-    "description": "Postgres in bb: browse schemas, schema-aware completion, controlled write/DDL (Agent write / Allow DDL off by default).",
+    "description": "Postgres in bb: browse all databases, schema-aware completion, controlled write/DDL (Agent write / Allow DDL on by default for new connections).",
     "branding": {
       "icon": "Layers"
     },
@@ -23,7 +23,7 @@
     "skills": []
   },
   "scripts": {
-    "test:completion": "rm -rf /tmp/bb-sql-completion-test && mkdir -p /tmp/bb-sql-completion-test && tsc --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir /tmp/bb-sql-completion-test --rootDir . lib/sql-completion/complete.ts lib/sql-completion/context.ts lib/sql-completion/rank.ts lib/sql-completion/keywords.ts lib/sql-completion/types.ts lib/sql-completion/index.ts lib/sql-completion/complete.test.ts lib/sql-statements.ts && node --test /tmp/bb-sql-completion-test/lib/sql-completion/complete.test.js"
+    "test:completion": "rm -rf /tmp/bb-sql-completion-test && mkdir -p /tmp/bb-sql-completion-test && tsc --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir /tmp/bb-sql-completion-test --rootDir . lib/sql-completion/complete.ts lib/sql-completion/context.ts lib/sql-completion/rank.ts lib/sql-completion/keywords.ts lib/sql-completion/types.ts lib/sql-completion/table-alias.ts lib/sql-completion/index.ts lib/sql-completion/complete.test.ts lib/sql-statements.ts && node --test /tmp/bb-sql-completion-test/lib/sql-completion/complete.test.js"
   },
   "dependencies": {
     "@hugeicons/core-free-icons": "^4.1.3",

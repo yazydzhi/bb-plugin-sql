@@ -61,8 +61,12 @@ export function rankCompletionItems(
   const byKey = new Map(usages.map((item) => [item.usageKey, item]));
   const ranked: CompletionItem[] = [];
   for (const item of items) {
-    const match = matchScore(item.label, prefix);
-    if (match === null) {
+    const labelMatch = matchScore(item.label, prefix);
+    const filterMatch = item.filterText
+      ? matchScore(item.filterText, prefix)
+      : null;
+    const match = Math.max(labelMatch ?? -1, filterMatch ?? -1);
+    if (match < 0) {
       continue;
     }
     const score = match + usageBoost(byKey.get(item.usageKey), nowMs);

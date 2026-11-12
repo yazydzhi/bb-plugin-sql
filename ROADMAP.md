@@ -136,6 +136,22 @@ Stay on the lightweight editor (no Monaco/LSP yet).
 
 **Out of 0.6:** JOIN-FK hints, full LSP, LLM ghost-text.
 
+### 0.6.1 — Query session persistence
+
+- [x] Keep editor SQL + result tabs across bb tab switches (panel remount);
+  server-side query session + `editorSql` pref; draft handoff still works
+
+### 0.6.2 — All databases + safer new-connection defaults
+
+- [x] **Show all databases** (DBeaver-style): browse every DB on the server;
+  secondary pools; active DB for Query / Show records
+- [x] New connection defaults: Read-only **off**, Agent write **on**, Allow DDL **on**,
+  Show all databases **on** (existing connections keep stored flags)
+
+### 0.6.3 — Duplicate connection
+
+- [x] ⋮ → **Duplicate**: copy host/flags/SSL/password; name `Name (copy)`
+
 ## 0.7 — Editable results + safer writes
 
 Human write UX on top of 0.5 gates. Agents keep writing SQL via tools.
@@ -206,5 +222,5 @@ Candidate themes (pick by feedback, not a commitment):
 ## Feedback
 
 Issues and PRs on the GitHub repo are welcome. The plugin is listed in
-bb-community (`^0.5.4`). **0.6 schema completion** lands in `v0.6.0` (path install);
-bump marketplace range when tagging.
+bb-community. Ship tag **`v0.6.3`** (completion aliases, query session,
+show-all-databases, duplicate connection); marketplace range **`^0.6.3`**.
